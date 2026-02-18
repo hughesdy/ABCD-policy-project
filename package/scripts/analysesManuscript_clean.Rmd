@@ -1,0 +1,2152 @@
+---
+title: "finalPipeline"
+author: "Dylan Hughes"
+date: "2023-11-05"
+output: html_document
+---
+```{r}
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+```
+
+## 06/01/2025 - sum the 4 gender diversity items as done in recent lit; oh we already did, it's called gish.sum
+
+# ---- SETUP ----
+Initialize project directory
+```{r}
+proj_dir = "/Users/dylanhughes/Documents/psychosis_gender_project/abcd/manuscript/package/"
+setwd(proj_dir)
+
+# automatically set path to subdirectory with useful functions
+fun_dir = file.path(proj_dir, "scripts/funcs")
+
+# automatically set path to subdirectory for outputs
+out_dir = file.path(proj_dir, "outputs")
+```
+
+# export tables to what directory?
+```{r}
+#table_dir = "/Users/dylanhughes/Documents/psychosis_gender_project/abcd/tables/"
+```
+
+# functions for initializing, running, and reading models
+```{r}
+source(file.path(fun_dir, "abcd_policy_lmer.R"))
+source(file.path(fun_dir, "abcd_policy_gtInterpret.R"))
+```
+
+# Libraries
+```{r, libs}
+library(knitr)
+library(dplyr)
+library(ggplot2)
+library(lme4)
+library(devtools)
+library(lmerTest)
+library(mediation)
+library(conflicted)
+library(gt)
+library(lmtest)
+library(flexplot)
+library(finalfit)
+library(usmap)
+library(glmmTMB)
+library(simr)
+
+# Conflict settings
+conflict_prefer('select', 'dplyr')
+conflict_prefer('filter','dplyr')
+conflict_prefer("lmer", "lmerTest")
+conflict_prefer("recode","dplyr")
+
+#
+devtools::document('~/Documents/GitHub/dylanfuncs/dylanfuncs')
+```
+
+
+# initialize simple mediation function  
+Just a quick and dirty way of estimating direct and indirect effects from mediation models. This does not provide a significance value for the indirect effect which much be derived via bootstrapping or other methods (see mediation package which is used for main results in JAMA Network Open paper)
+```{r}
+source(file.path(fun_dir, "roughMediation.R"))
+```
+
+# A couple other little functions  
+They're short enough to not create separate scripts..
+```{r, lil-funcs}
+pullOutcome <- function(model) {
+  if (class(model) == 'lmerModLmerTest') {
+    call = as.character(model@call)  
+  } else if (class(model) == 'lm') {
+    call = as.character(model$call)
+  }
+  
+  split = strsplit(call[2], split = '')[[1]]
+  tilde = which(split == '~')
+  outcome = substr(call[2], 1, tilde-2)
+  
+  return(outcome)
+}
+
+assignLabels <- function(demo.table, explanatory.vars, explanatory.labels) {
+  pos <- which(demo.table$label %in% explanatory.vars)
+  demo.table$label[pos] = explanatory.labels
+  return(demo.table)
+}
+
+# Function for easily writing supplementary tables to output folder
+write_supptab <- function(table, supptab, name, row.names=T) {
+  filename = paste0(supptab, "_", name, ".csv")
+  path = file.path(out_dir, "tables", filename)
+  write.csv(table,path,row.names=row.names)
+  cat(sprintf("Written to %s", path))
+}
+
+# generate confidence intervals for hurdle model estimates (wrapped within munge_hurdle() function)
+pull_confint_hurdle <- function(model) {
+  confint_df = as.data.frame(confint(model))
+  confint_df = confint_df[which(grepl("cond.", rownames(confint_df))),]
+  confint_df = confint_df[which(!grepl("Std.Dev.", rownames(confint_df))),]
+  
+  intervals = paste0("[", 
+                     round(confint_df[,1], 3), ",", 
+                     round(confint_df[,2], 3), "]")
+  
+  return(intervals)
+}
+
+# Compile hurdle results into neat table for export, requires pretty_names variable defined below
+munge_hurdle <- function(model) {
+  coef_hurdle = as.data.frame(summary(model)$coefficients$cond)
+  coef_hurdle = coef_hurdle[, c(1,2,4)]
+  coef_hurdle$ci = pull_confint_hurdle(model)
+  coef_hurdle[,1] = round(coef_hurdle[,1], 3)
+  coef_hurdle[,2] = round(coef_hurdle[,2], 3)
+  coef_hurdle[,3] = ifelse(coef_hurdle[,3] >= 0.001, round(coef_hurdle[,3], 3),
+                           format(coef_hurdle[,3], scientific=T, digits = 3))
+  
+  colnames(coef_hurdle) = c("Estimate","Std.Error","P","95% CI")
+  
+  # Some syntax to make the output names alright
+  check_dict = function(x) {
+      if (x %in% names(pretty_names)) {
+        return(pretty_names[[x]])
+      } else {
+        warning(x, " not found in rowname.dict")
+        return(x)
+      }
+  }
+  
+  rownames(coef_hurdle) = sapply(
+    rownames(coef_hurdle),
+    function(x) {
+      if (grepl(":", x, fixed = T)) {
+                               split = strsplit(x, ":", fixed = T)[[1]]
+
+                               vars = rep(NA, length(split))
+
+                               for (i in 1:length(vars)) {
+                                 vars[i] = check_dict(split[i])
+                               }
+                               val = paste(vars, collapse = " x ")
+
+                               return(val)
+                             } else {
+                               check_dict(x)
+                             }
+                             
+                           })                             
+                           
+  
+  return(coef_hurdle)
+}
+```
+
+
+# define cross-sectional covariates and random effects structure; 
+#initialize pretty_name dictionary (rowname.dict)
+```{r}
+# Fixed effects covariates
+covariates_master = c(
+  "age.year",
+  "sex",
+  "z.puberty",
+  "highest_edu",
+  "combined_income"
+)
+
+# Random effects for LMEs
+re_master = "(1|site_id_l/rel_family_id)"
+
+# supplemental covariates (i.e., for race and ethnicity)
+covariates_race = c(
+  "age.year",
+  "sex",
+  "z.puberty",
+  "highest_edu",
+  "combined_income",
+  "race.6level",
+  "hispanic"
+)
+
+# policy covariates (i.e., covariates_master + gini coefficient)
+covariates_policy = c(
+  covariates_master,
+  "gini"
+)
+
+# set dictionary of names for pretty gt tables. This could probably just be an excel table but oh well. space is free.
+pretty_names = list(
+    "(Intercept)" = "(Intercept)",
+    
+    # GV step levels
+    "GV.step1-STEP" = "Gender diversity (1-STEP)",
+    "GV.step2-STEP" = "Gender diversity (2-STEP)",
+    "GV.stepMost GD" = "Gender diversity (Most GD)",
+    
+    # age in years
+    "age.year" = "Age",
+    
+    # sex
+    "sexM" = "Birth-assigned sex (Male)",
+    
+    # puberty
+    "z.puberty" = "Puberty",
+    
+    #edu
+    "highest_edu" = "Parental education",
+    
+    #income
+    "combined_income" = "Family income",
+    
+    #race
+    "race.6levelBlack" = "Race (Black)",
+    "race.6levelAsian" = "Race (Asian)",
+    "race.6levelAIAN/NHPI" = "Race (AIAN/NHPI)",
+    "race.6levelOther" = "Race (Other)",
+    "race.6levelMultiracial" = "Race (Multiracial)",
+    "hispanicHispanic" = "Ethnicity (Hispanic)",
+    
+    #bpm
+    "z.bpm.total" = "BPM total",
+    
+    #peq
+    "z.peq.perp.sum" = "PEQ Perpetration",
+    "z.peq.vic.sum" = "PEQ Victimization",
+    "peq.vic.sum" = "PEQ Victimization",
+    
+    #pqb
+    "z.pqb.distress" = "PQBC",
+    
+    #gini
+    "gini" = "Gini Coefficient",
+    
+    #policy
+    "gid_tally_prop_bin1" = "State policy (High support)",
+    "delta.GID.LevelsIncreased" = "State policy (Increasing)",
+    "delta.GID.LevelsLowNoChange" = "State policy (Consistently low)",
+    
+    #time
+    "time.point" = "Time"
+  )
+
+```
+
+# define longitudinal covariates
+```{r}
+# Fixed effects covariates for longitudinal models
+covariates_long = c(
+  "sex",
+  "z.puberty",
+  "highest_edu",
+  "combined_income"
+)
+
+# Fixed effects covariates for longitudinal models that include analysis of policy
+covariates_long_policy = c(
+  covariates_long,
+  "gini"
+)
+
+# Random effect structure for longitudinal models
+re_long = "(time.point | site_id_l/rel_family_id/subjectkey)"
+```
+
+# read and munge data a bit
+```{r, include = F}
+## Read in master
+master <- read.csv(file.path(proj_dir,'data/masterSheet_20260206.csv'))
+
+# relevel eventname
+master$eventname = factor(master$eventname, levels = c("Y1","Y2","Y3","Y4"))
+
+# relevel/recode race
+master$race.6level[master$race.6level == "Mixed"] = "Multiracial"
+
+master$race.6level = factor(
+  master$race.6level, 
+  levels = c("White", "Black", "Asian", "AIAN/NHPI", "Other", "Multiracial")
+)
+
+# relevel hispanic variable
+master$hispanic = factor(
+  master$hispanic,
+  levels = c("Non-Hispanic", "Hispanic")
+)
+
+# code family id as a factor
+master$rel_family_id = as.factor(master$rel_family_id)
+
+# relevel gv step; 06/13/25: change names
+master$GV.step = recode(master$GV.step,
+                        `CONGRUENT` = "Least GD",
+                        `MINORITY` = "Most GD")
+  
+master$GV.step = factor(master$GV.step, levels = c("Least GD","1-STEP","2-STEP","Most GD"))
+
+
+# relevel gv step long
+master$GV.step.long = factor(
+  master$GV.step.long,
+  levels = c("CONGRUENT","1-STEP","2-STEP","MINORITY")
+)
+
+# new variable gv.step.long min or not
+master$GV.step.long.bin = ifelse(master$GV.step.long %in% c("MINORITY", "1-STEP","2-STEP"), "MINORITY", 
+                                 ifelse(master$GV.step.long %in% "CONGRUENT", "CONGRUENT", NA))
+
+## munge df so that we only have data from > timepoint 1
+master <- filter(master, eventname != 'baseline_year_1_arm_1') %>%
+  filter(!is.na(GV.step))
+
+# set age on a year scale
+master$age.year = master$age/12
+
+# recode sex at birth as male and female
+master$sex = recode(master$sex,
+                    `1` = "M",
+                    `2` = "F")
+
+## We will add the 2020 electoral map to the year 3 data; this was collated manually.
+master$electoral_value2020 = ifelse(master$STATE %in% c("CA","OR","CO","MN","WI","MI","PA","NY","VT","CT","MD","VA"), "Dem",
+                                   ifelse(master$STATE %in% c("SC","FL","MO","OK","UT"), "Rep", NA))
+
+# Make person level gv step var
+master$gv.step.num = 
+  ifelse(
+    master$GV.step == "Least GD", 0,
+    ifelse(
+      master$GV.step == "1-STEP", 1,
+      ifelse(
+        master$GV.step == "2-STEP", 2,
+        ifelse(master$GV.step == "Most GD", 3, NA)
+      )
+    )
+  )
+
+if (!"person.level.gv.step" %in% colnames(master)) {
+  master <- master %>%
+    group_by(subjectkey) %>%
+    mutate(person.level.gv.step = mean(gv.step.num)) %>%
+    ungroup() %>%
+    as.data.frame()
+}
+```
+
+# ----------------------
+## MAKE YEAR 3 DATA 
+
+Select variables that will be used in main analyses. There are 1k participants with missing data for BPM. Since BPM is only used in supplementary analyses, we won't condition the NA removal on BPM, but add it back in after.  
+  
+We're also choosing *not* to condition NA removal on race, since it is supplementary.
+
+Otherwise, income and pubertal status have the highest missingness. To increase sample size, we could consider including only highest education as a marker of SES (education and income are largely collinear), but we've selected to include for now due to precedent and because there is little effect on interpretation of results.
+```{r, make-year3-dataframe}
+# -- cross sectional data
+year3 <- filter(master, eventname == 'Y3') 
+
+#y3_missingness = apply(year3, MARGIN = 2, function(x) sum(is.na(x)))
+#as.data.frame(sort(y3_missingness))
+
+
+year3_nona <- year3 %>%
+  dplyr::select(
+    subjectkey,
+    eventname,
+    STATE, site_id_l, rel_family_id, # groupings
+    age, age.year, sex, gender.identity, 
+    combined_income, highest_edu,
+    ppdms.mean, # puberty
+    peq.perp.sum, peq.vic.sum, z.peq.vic.sum, z.peq.perp.sum, # bullying
+    GV.step, # gender diversity (main IV)
+    gid_tally_prop, gid_tally_prop_bin, # state-level policy
+    gini, # gini coefficient
+    pqb.distress, z.pqb.distress #pqbc
+  ) %>%
+  na.omit() %>%
+  
+  # Rejoin with data that are needed for supplementary analyses
+  left_join(., dplyr::select(
+    year3,
+    subjectkey, race.4level, race.6level, hispanic,
+    bpm.total, z.bpm.total,
+    gish1m, gish2m, gish3m, gish4m, gish1f, gish2f, gish3f, gish4f
+  ), by = "subjectkey")
+
+year3_nona$z.puberty = as.numeric(scale(year3_nona$ppdms.mean))
+year3_nona$z.pqb.distress = as.numeric(scale(year3_nona$pqb.distress))
+year3_nona$gid_tally_prop_bin = as.factor(year3_nona$gid_tally_prop_bin)
+```
+# --------------------------------------------------
+## Mean and standard deviation of age at Y1 and Y4
+```{r}
+mean(master$age.year[master$eventname == "Y1"], na.rm=T)
+sd(master$age.year[master$eventname == "Y1"], na.rm=T)
+
+mean(master$age.year[master$eventname == "Y3"], na.rm=T)
+sd(master$age.year[master$eventname == "Y3"], na.rm=T)
+
+mean(master$age.year[master$eventname == "Y4"], na.rm=T)
+sd(master$age.year[master$eventname == "Y4"], na.rm=T)
+```
+# ------------------------
+## Table 1 - Demographics
+
+```{r}
+explanatory.vars = 
+  c("age.year", "sex", "ppdms.mean", "race.6level", "hispanic", "highest_edu", "combined_income","pqb.distress", "peq.vic.sum", "peq.perp.sum", "bpm.total")
+
+explanatory.labels = 
+  c("Age", "Birth-Assigned Sex", "Pubertal Development", "Race", "Ethnicity", "Parental Education","Family Income","Psychotic-like Experiences", "Bullying victimization", "Bullying perpetration", "Broad mental health problems")
+
+demo.table <- year3_nona %>%
+  summary_factorlist("GV.step", explanatory.vars, p=T, na_include=F) %>%
+  assignLabels(., explanatory.vars, explanatory.labels)
+
+n_mostGD = sum(year3_nona$GV.step == "Most GD")
+mostgd_lab = paste0("Most GD (n=", n_mostGD, ")")
+
+n_2step = sum(year3_nona$GV.step == "2-STEP")
+step2_lab = paste0("2-STEP (n=", n_2step, ")")
+
+n_1step = sum(year3_nona$GV.step == "1-STEP")
+step1_lab = paste0("1-STEP (n=", n_1step, ")")
+
+n_leastGD = sum(year3_nona$GV.step == "Least GD")
+leastgd_lab = paste0("Least GD (n=", n_leastGD, ")")
+
+colnames(demo.table) = c("Variable", "Levels", leastgd_lab, step1_lab, step2_lab, mostgd_lab, "P")
+
+
+demo.table %>%
+  gt() %>%
+  tab_style(cell_text(weight = 'bold'), locations = cells_column_labels()) %>%
+  tab_header(title = "Demographics Table by Gender Diversity Group") %>%
+  tab_options(table.font.names = "Times New Roman")
+
+write.csv(
+  demo.table, 
+  file.path(out_dir, "tables/TABLE1_demographics_table.csv"), 
+  row.names=F
+)
+```
+
+
+# -----------------------------------
+## Gender identity by GV step table
+# >> SUPPTABLE 1 <<
+```{r}
+supptab = "SUPPTAB1"
+outname = "felt_gender_by_gender_diversity"
+
+##
+explanatory.vars = c("gender.identity")
+explanatory.labels = c("Gender Identity")
+
+year3_nona$gender.identity = factor(year3_nona$gender.identity,
+                               levels = c("Female","Male","Trans Female","Trans Male",
+                                          "Gender Queer", "Different"))
+
+demo.table <- year3_nona %>%
+  summary_factorlist("GV.step", explanatory.vars, na_include=F) %>%
+  assignLabels(., explanatory.vars, explanatory.labels) %>%
+  select(-label)
+
+colnames(demo.table) = c("Gender Identity", leastgd_lab, step1_lab, step2_lab, mostgd_lab)
+
+
+demo.table %>%
+  gt() %>%
+  tab_style(cell_text(weight = 'bold'), locations = cells_column_labels()) %>%
+  tab_header(title = "Gender Identity by Felt-Gender Groups") %>%
+  tab_options(table.font.names = "Times New Roman")
+
+write_supptab(
+  table = demo.table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+# --------------------
+## Missingness   Table
+# > SUPPTABLE 3 <
+```{r}
+supptab="SUPPTAB3"
+outname = "missingness_table"
+
+##
+
+y3_forMiss = mutate(year3, analy_missing = 
+                      ifelse(subjectkey %in% year3_nona$subjectkey, "Kept", 
+                             ifelse(!subjectkey %in% year3_nona$subjectkey, "Omit", NA)))
+
+
+explanatory.vars = 
+  c("GV.step", "age.year", "sex", "ppdms.mean", "race.6level", "hispanic", "highest_edu", "combined_income","pqb.distress", "peq.vic.sum", "peq.perp.sum", "bpm.total")
+
+explanatory.labels = 
+  c("Gender Diversity", "Age", "Birth-Assigned Sex", "Pubertal Development", "Race", "Ethnicity", "Parental Education","Family Income","Psychotic-like Experiences", "Bullying victimization", "Bullying perpetration", "Broad mental health problems")
+
+missing.table <- y3_forMiss %>%
+  summary_factorlist("analy_missing", explanatory.vars, p=T, na_include=F) %>%
+  assignLabels(., explanatory.vars, explanatory.labels)
+
+missing.table %>%
+  gt() %>%
+  tab_style(cell_text(weight = 'bold'), locations = cells_column_labels()) %>%
+  tab_header(title = "Missingness Table") %>%
+  tab_options(table.font.names = "Times New Roman")
+
+colnames(missing.table) = c("Variable", "Levels", "Retained", "Omitted", "P")
+
+write_supptab(
+  table = missing.table,
+  supptab = supptab,
+  name = outname,
+  row.names=F
+)
+```
+
+# ------------------------
+## breakdown of GV step variable; table/figure of felt gender questions
+```{r}
+year3_nona$gish1.forTable = ifelse(year3_nona$sex == "F", year3_nona$gish1f,
+                              ifelse(year3_nona$sex == "M", year3_nona$gish1m, NA))
+
+year3_nona$gish2.forTable = ifelse(year3_nona$sex == "F", year3_nona$gish2f, 
+                              ifelse(year3_nona$sex == "M", year3_nona$gish2m, NA))
+
+gish.tab = as.matrix(table(year3_nona$gish1.forTable, year3_nona$gish2.forTable))
+
+gish.tab.df = as.data.frame(gish.tab)
+gish.tab.df$fill = factor(c("Least GD", "1-STEP", rep("Most GD", 3),
+                     "1-STEP", "2-STEP", rep("Most GD", 18)),
+                     levels = c("Least GD","1-STEP","2-STEP","Most GD"))
+
+gish.tab.df$Var1 = recode(gish.tab.df$Var1, 
+                          `1` = "Totally",
+                          `2` = "Mostly",
+                          `3` = "Somewhat",
+                          `4` = "A little",
+                          `5` = "Not at all")
+gish.tab.df$Var2 = recode(gish.tab.df$Var2,
+                          `1` = "Not at all",
+                          `2` = "A little",
+                          `3` = "Somewhat",
+                          `4` = "Mostly",
+                          `5` = "Totally")
+
+
+
+ggplot(gish.tab.df, aes(x = Var1, y = Var2, fill = fill)) + 
+  geom_tile(color = "black", size = 0.8) +
+  geom_text(aes(label = Freq), color = "black") +
+  xlab("1. How much do you feel like a <boy/girl>?") + 
+  ylab("2. How much do you feel like a <girl/boy>?") +
+  scale_fill_manual(values = c("grey36", "grey50", "grey80","grey99")) +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+
+ggsave(file.path(out_dir, "plots/FIGURE1_gv-step-var-breakdown.png"))
+
+ggsave(file.path(out_dir, "plots/FIGURE1_gv-step-var-breakdown.svg"))
+
+```
+
+
+# -------------------
+## PQBC Distribution
+```{r, pqb-distribution}
+ggplot(year3_nona, aes(x = pqb.distress)) +
+  geom_histogram(bins = 50)
+
+ggplot(year3_nona, aes(x = peq.vic.sum)) +
+  geom_histogram(bins = 50)
+```
+
+# ------------------
+## State policy maps
+```{r, state-policy-maps}
+## Cross-sectional (Year 3) map of laws
+states= unique(year3_nona$STATE)[!is.na(unique(year3_nona$STATE))]
+
+y3_forMap = data.frame("state" = unique(year3_nona$STATE)[!is.na(unique(year3_nona$STATE))],
+                       "gid_tally_prop_bin" = sapply(states, function(x) sample(year3_nona$gid_tally_prop_bin[year3_nona$STATE == x], 1)))
+
+plot_usmap(data = y3_forMap, values = "gid_tally_prop_bin", regions = "states") +
+  guides(fill = guide_legend(title = "State Policy Group")) +
+  scale_fill_manual(labels = c("Low", "High"), values = c("lightslateblue","gold"))
+
+ggsave(file.path(out_dir, "plots/us-map-y3-policy.png"))
+
+
+## Longitudinal
+
+## Make counts of delta GID (y1 through y4) and delta GID (y1 through y3) per state to show how one state can have multiple values based on when the participant joined the study
+y1 = filter(master, eventname == "Y1")
+states = unique(y1$STATE)
+states = states[!is.na(states)]
+
+policy_counts.1t4 = as.data.frame(matrix(0, ncol = 4, nrow = length(states)))
+colnames(policy_counts.1t4) = c("state", "LowNoChange","Increased","HighNoChange")
+
+policy_counts.1t3 = as.data.frame(matrix(0, ncol = 4, nrow = length(states)))
+colnames(policy_counts.1t3) = c("state", "LowNoChange","Increased","HighNoChange")
+
+
+for (state in states) {
+  i=which(states==state)
+  
+  policy_counts.1t4$state[i] = state
+  policy_counts.1t3$state[i] = state
+    
+  uniq_policies.1t4 = unique(y1$delta.GID.Levels[y1$STATE==state])
+  uniq_policies.1t4_nona = uniq_policies.1t4[!is.na(uniq_policies.1t4)]
+  
+  for (policy in uniq_policies.1t4_nona) {
+    policy_counts.1t4[i, which(colnames(policy_counts.1t4) == policy)] = 
+      length(which(y1$delta.GID.Levels[y1$STATE == state] == policy))
+  }
+  
+  uniq_policies.1t3 = unique(y1$delta.GID.Levels.1t3[y1$STATE==state])
+  uniq_policies.1t3_nona = uniq_policies.1t3[!is.na(uniq_policies.1t3)]
+  
+  for (policy in uniq_policies.1t3_nona) {
+    policy_counts.1t3[i, which(colnames(policy_counts.1t3) == policy)] = 
+      length(which(y1$delta.GID.Levels.1t3[y1$STATE == state] == policy))
+  }
+  
+}
+
+## Y1-Y4 total count; n=4515
+sum(policy_counts.1t4[,2:4])
+policy_counts.1t4
+
+## Y1-Y3 total count; n = 9837
+sum(policy_counts.1t3[,2:4])
+
+
+createDataForStatePolicyTable = function(x, timespan = "y1y4") {
+  df = data.frame("state" = rep(x$state, each = 4),
+                  "interview_year" =
+                    unique(y1$interview_year)[!is.na(unique(y1$interview_year))],
+                  "n" = rep(0, nrow(x)*4),
+                  "deltaGID" = rep(NA, nrow(x)*4))
+  
+  if (timespan == "y1y4") {
+    y1filt = filter(y1, !is.na(delta.GID.Levels))
+    var = 'delta.GID.Levels'
+  } else if (timespan == "y1y3") {
+    y1filt = filter(y1, !is.na(delta.GID.Levels.1t3))
+    var = 'delta.GID.Levels.1t3'
+  }
+  
+  for (i in c(1:nrow(df))) {
+    state = df$state[i]
+    year = df$interview_year[i]
+    
+    df$n[i] = length(which(y1filt$STATE == state & y1filt$interview_year == year))
+    
+    dgid = unique(y1filt[y1filt$STATE == state & y1filt$interview_year == year, var])
+    dgid = dgid[!is.na(dgid)]
+    
+    if (length(dgid) > 1) {
+      message("More than 1 delta GID for state, ", state, " at year ", year)
+      tab = table(y1filt[y1filt$STATE == state & y1filt$interview_year == year,var])
+      print(tab)
+      
+      majority = names(which.max(tab))
+      message("Choosing majority: ", majority)
+      
+      df$deltaGID[i] = majority
+      
+    } else if (length(dgid) == 0) {
+      next
+    } else {
+      df$deltaGID[i] = dgid 
+    }
+  }
+  
+  return(df)
+}
+
+datafortile.1t4 = createDataForStatePolicyTable(policy_counts.1t4)
+
+ggplot(datafortile.1t4[datafortile.1t4$interview_year != 2020,], aes(x = interview_year, y = state, fill = deltaGID)) +
+  geom_tile(color = "black") +
+  geom_text(aes(label = n)) +
+  ylab("State") +
+  xlab("Year participated") +
+  labs(fill = "State policy variable") +
+  theme(text = element_text(size = 12, face = "bold", family = "Times New Roman")) +
+  theme(axis.text.x = element_text(size = 14)) +
+  theme(axis.text.y = element_text(size = 14))
+
+ggsave(file.path(out_dir, "plots/tile-plot-longPolicy-byState-1t4.png"))
+
+
+datafortile.1t3 = createDataForStatePolicyTable(policy_counts.1t3, timespan = "y1y3")
+
+ggplot(datafortile.1t3, aes(x = interview_year, y = state, fill = deltaGID)) +
+  geom_tile(color = "black") +
+  geom_text(aes(label = n)) +
+  ylab("State") +
+  xlab("Year enrolled") +
+  labs(fill = "State policy variable") +
+  theme(text = element_text(size = 12, face = "bold", family = "Times New Roman")) +
+  theme(axis.text.x = element_text(size = 14)) +
+  theme(axis.text.y = element_text(size = 14))
+
+# --------------------------------------------------------------------------------
+```
+
+# > FIGURE 2 <
+```{r, state-policy-maps}
+## Make maps of policy variable. Again, we'll assign states a value based on the policy level (HighNoChange, Increased, LowNoChange) represented by the most subjects within each state. 
+dataForGIDMap = data.frame("state" = states,
+                            "deltagid" = rep(NA, length(states)))
+for (state in states) {
+  i=which(states == state)
+  uniqs = unique(y1$delta.GID.Levels[y1$STATE == state])
+  uniqs = uniqs[!is.na(uniqs)]
+  
+  if (length(uniqs) > 1) {
+    tab = table(y1$delta.GID.Levels[y1$STATE == state])
+    majority = names(which.max(tab))
+    dataForGIDMap$deltagid[i] = majority
+  } else {
+    dataForGIDMap$deltagid[i] = uniqs
+  } 
+}
+
+plot_usmap(data = dataForGIDMap, values = "deltagid", regions = "states") + 
+  guides(fill = guide_legend(title = "Policy change variable"))
+
+ggsave(file.path(out_dir, "plots/FIGURE2_us-map-longPolicy-deltagid-states.png"))
+
+ggsave(file.path(out_dir, "plots/FIGURE2_us-map-longPolicy-deltagid-states.svg"))
+
+## Make maps of policy proportion variable by year
+years = c(2017:2022)
+
+dataForPropMap = data.frame("state" = states,
+                            "prop17" = rep(NA, length(states)),
+                            "prop18" = rep(NA, length(states)),
+                            "prop19" = rep(NA, length(states)),
+                            "prop20" = rep(NA, length(states)),
+                            "prop21" = rep(NA, length(states)),
+                            "prop22" = rep(NA, length(states)))
+
+for (state in states) {
+  i=which(states == state)
+  
+  for (year in years) {
+    a=which(years == year)+1
+    yearDat = filter(master, interview_year == year) %>%
+      filter(!is.na(gid_tally_prop)) %>%
+      filter(STATE == state)
+    
+    if (nrow(yearDat) == 0) {
+      next
+    }
+    
+    if (mean(yearDat$gid_tally_prop) == sample(yearDat$gid_tally_prop, 1)) {
+      dataForPropMap[i,a] = mean(yearDat$gid_tally_prop)
+    } else {
+      print("Multiple prop values for a single year")
+    }
+  }
+}
+
+# plot_usmap(data = dataForPropMap, values = "prop17", regions = "states") +
+#   scale_fill_viridis_b() +
+#   guides(fill = guide_legend(title = "Tally proportion"))
+# 
+# plot_usmap(data = dataForPropMap, values = "prop18", regions = "states") +
+#   scale_fill_viridis_b()
+# 
+# plot_usmap(data = dataForPropMap, values = "prop19", regions = "states") +
+#   scale_fill_viridis_b()
+
+allStates = usmap::statepop$abbr
+
+allStatelongData = data.frame("state" = rep(allStates, 6),
+                      "year" = c(rep(c(2017:2022), each = length(allStates))))
+
+sampleLongData = data.frame("state" = rep(dataForPropMap$state, 6),
+                      "year" = c(rep(c(2017:2022), each = length(states))),
+                      "prop" = c(dataForPropMap$prop17,
+                                 dataForPropMap$prop18,
+                                 dataForPropMap$prop19,
+                                 dataForPropMap$prop20,
+                                 dataForPropMap$prop21,
+                                 dataForPropMap$prop22))
+
+longData = left_join(allStatelongData, sampleLongData, by = c("state","year"))
+
+
+plot_usmap(data = longData, values = "prop", regions = "states") +
+  facet_wrap(~year) +
+  scale_fill_viridis_b() +
+  theme(legend.position = "bottom") +
+  labs(fill = "Tally proportion") +
+  theme(text = element_text(family = "Times New Roman", size = 14)) +
+  theme(legend.text = element_text(size = 8))
+
+ggsave(file.path(out_dir, "plots/us-map-tallyProp-overTime.png"))
+```
+
+
+
+# =====================================
+# Cross-Sectional (age 13ish)
+# =====================================
+
+# ---------- 
+## Relationship between GV.step and PQB with covariates
+# > SUPPTABLE4 <
+```{r}
+supptab = "SUPPTAB4"
+outname = "lmeResults-pqb-byGV-with-covariates"
+
+##
+# Quick n dirty viz of diffs
+# ggplot(year3_nona, aes(x = GV.step, y = z.pqb.distress, fill = GV.step)) + geom_bar(stat = 'summary') + ylab('PQB (standardized)')
+
+model <- abcd_policy_lmer(
+  dv = "z.pqb.distress",
+  iv = "GV.step",
+  covariates = c(covariates_master),
+  random_effects = re_master,
+  data = year3_nona
+)
+
+tab = abcd_policy_gtInterpret(model = model, dvlab = "PQ-BC", return.table = T)
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+# -----------
+# Rx btwn GV.step and PQB with covariates + race
+# > SUPPTABLE 5 <
+```{r}
+
+supptab = "SUPPTAB5"
+outname = "lmeResults-pqb-byGV-with-covariates-and-race"
+
+# - same model but with race and ethnicity for supplement
+model_supp <- abcd_policy_lmer(
+  dv = "z.pqb.distress",
+  iv = "GV.step",
+  covariates = covariates_race,
+  random_effects = re_master,
+  data = year3_nona
+)
+
+tab = abcd_policy_gtInterpret(model = model_supp, dvlab = "PQBC", return.table = T)
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+# --------------
+### Relationship between GV step and BPM total with covariates
+# > SUPPTABLE 6 <
+```{r}
+
+supptab = "SUPPTAB6"
+outname = "lmeResults-bpm-byGV-with-covariates"
+
+#
+
+model <- abcd_policy_lmer(
+  dv = "z.bpm.total",
+  iv = "GV.step",
+  covariates = c(covariates_master),
+  random_effects = re_master,
+  data = year3_nona
+)
+
+tab = abcd_policy_gtInterpret(model = model, dvlab = "BPM Total", return.table = T)
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+# ------------
+### Relationship between GV.step and PEQ with covariates
+# > SUPPTABLE 7 <
+```{r}
+
+supptab = "SUPPTAB7"
+outname = "lmeResults-peq-byGV-with-covariates.csv"
+
+##
+
+# quick n dirty viz
+# ggplot(year3_nona, aes(x = GV.step, y = z.peq.vic.sum, fill = GV.step)) + geom_bar(stat = 'summary') + ylab('PEQ (standardized)')
+
+model <- abcd_policy_lmer(
+  dv = "z.peq.vic.sum",
+  iv = "GV.step",
+  covariates = c(covariates_master),
+  random_effects = re_master,
+  data = year3_nona
+)
+
+tab = abcd_policy_gtInterpret(model = model, dvlab = "PEQ Victimization", return.table = T)
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+# -------------
+## Relationship between GV.step and PEQ with covariates + race
+# > SUPPTABLE 8 <
+```{r}
+
+supptab = "SUPPTAB8"
+outname = "lmeResults-peq-byGV-with-covariates-race"
+
+#
+
+# --- SUPPLEMENTARY FOR RACE
+model_race <- abcd_policy_lmer(
+  dv = "z.peq.vic.sum",
+  iv = "GV.step",
+  covariates = covariates_race,
+  random_effects = re_master,
+  data = year3_nona
+)
+
+tab = abcd_policy_gtInterpret(model = model_race, dvlab = "PEQ Victimization", return.table = T)
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+# ---------------
+## Relationship between GV.step and PEQ with covariates + PEQ Perp
+# > SUPPTABLE 9 <
+```{r}
+
+supptab = "SUPPTAB9"
+outname = "lmeResults-peq-byGV-with-covariates-and-peqPerp"
+
+## Now control for perpetration
+model_perp <- abcd_policy_lmer(
+  dv = "z.peq.vic.sum",
+  iv = "GV.step",
+  covariates = c(covariates_master, "z.peq.perp.sum"),
+  random_effects = re_master,
+  data = year3_nona
+)
+
+tab = abcd_policy_gtInterpret(model = model_perp, dvlab = "PEQ Victimization", return.table = T)
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+
+
+```
+
+
+#. . .
+# ================
+# -- MEDIATION
+# ================
+
+# PQBC
+
+```{r}
+a = lme4::lmer(z.peq.vic.sum ~ GV.step + z.puberty + age + sex + highest_edu + site_id_l + (1|rel_family_id), year3_nona)
+
+medi = lme4::lmer(z.pqb.distress ~ GV.step + z.peq.vic.sum + z.puberty + age + sex +  highest_edu + site_id_l + (1|rel_family_id), year3_nona)
+
+mediation.model <- mediate(a, medi, treat = 'GV.step', mediator = 'z.peq.vic.sum', boot = F, sims = 1000, control.value = 'Least GD', treat.value = 'Most GD')
+
+# saveRDS(mediation.model, "~/Documents/psychosis_gender_project/abcd/data/main-mediation-model-gv-on-pqb-through-peq.rds")
+
+mediation.vals <- pull_important_medvals(m = a, y = medi, mdres = mediation.model)
+
+makeMediDiagram(mediation.vals, a.lab = 'GV-Minority', b.lab = 'Bullying', c.lab = 'PQB')
+
+summary(mediation.model)
+```
+
+# ----------------------------------------
+# -- rough mediation with pqb (no inference)
+```{r}
+data = year3_nona
+x = "GV.step"
+y = "z.pqb.distress"
+mediator = "z.peq.vic.sum"
+covariates = c(covariates_master, re_master)
+treat = "Most GD"
+
+roughMediation(data = data,
+               x = x,
+               y = y,
+               mediator = mediator, 
+               covariates = covariates,
+               treat = treat)
+
+confint(a, parm = "GV.stepMost GD")
+
+confint(medi, parm = "z.peq.vic.sum")
+
+confint(medi, parm = "GV.stepMost GD")
+
+totaleff = lme4::lmer(z.pqb.distress ~ GV.step + z.puberty + age + sex +  highest_edu + site_id_l + (1|rel_family_id), year3_nona)
+summary(totaleff)
+
+confint(totaleff, parm = "GV.stepMost GD")
+
+```
+
+# --------------------------
+## Broad psychopathology
+
+```{r}
+# --- mediation with mediate() to get p-value
+year3_nona.bpm <- filter(year3_nona, !is.na(z.bpm.total))
+  
+a = lme4::lmer(z.peq.vic.sum ~ GV.step + z.puberty + age.year + sex + highest_edu + combined_income + site_id_l + (1|rel_family_id), year3_nona.bpm)
+
+medi = lme4::lmer(z.bpm.total ~ GV.step + z.peq.vic.sum + z.puberty + age.year + sex + highest_edu + combined_income + site_id_l + (1|rel_family_id), year3_nona.bpm)
+
+mediation.model <- mediate(a, medi, treat = 'GV.step', mediator = 'z.peq.vic.sum', boot = F, sims = 10000, control.value = 'CONGRUENT', treat.value = 'MINORITY')
+
+summary(mediation.model)
+
+mediation.vals <- pull_important_medvals(m = a, y = medi, mdres = mediation.model)
+
+makeMediDiagram(mediation.vals, a.lab = 'GV-Minority', b.lab = 'Bullying', c.lab = 'PQB')
+
+```
+# -------------------
+# -- rough mediation
+```{r}
+
+# <><><><><><><><> mediation through bullying <><><><><><><>
+# --- rough mediation
+data = year3_nona
+x = "GV.step"
+y = "z.bpm.total"
+mediator = "z.peq.vic.sum"
+covariates = c(covariates_master, re_master)
+treat = "Most GD"
+
+roughMediation(
+  data = data,
+  x = x,
+  y = y,
+  mediator = mediator,
+  covariates = covariates,
+  treat = treat
+)
+
+# CI around a
+confint(a, parm = "GV.stepMost GD")
+
+# CI around b
+confint(medi, parm = "z.peq.vic.sum")
+
+# CI around c
+confint(lmer(z.bpm.total ~ GV.step + z.puberty + age.year + sex + highest_edu + combined_income + site_id_l + (1|rel_family_id), data = year3_nona.bpm), parm = "GV.stepMost GD")
+
+# CI around c'
+confint(medi, parm = "GV.stepMost GD")
+
+```
+
+# -------
+# Hurdle pqb on gv
+# > SUPPTABLE10 <
+```{r, pqbc-hurdle-init}
+supptab = "SUPPTABLE10"
+outname = "hurdle-pqb-on-gv"
+
+hurdle_init = glmmTMB(
+  formula = pqb.distress ~ GV.step + z.puberty + age.year + sex + highest_edu + combined_income + (1|site_id_l/rel_family_id),
+  data = year3_nona,
+  family = ziGamma(link = "log"),
+  ziformula = ~ GV.step + z.puberty + age.year + sex + highest_edu + combined_income + (1|site_id_l/rel_family_id)
+)
+
+coef_hurdle_init = munge_hurdle(hurdle_init)
+
+write_supptab(
+  table = coef_hurdle_init,
+  supptab = supptab,
+  name = outname
+)
+```
+
+# --------
+# hurdle pqb on gv with peq
+# > SUPPTABLE11 <
+```{r, pqbc-hurdle-medi}
+supptab = "SUPPTAB11"
+outname = "hurdle-pqb-on-gv-with-peq"
+
+hurdle_medi = glmmTMB(
+  formula = pqb.distress ~ GV.step + z.peq.vic.sum + z.puberty + age.year + sex + highest_edu + combined_income + (1|site_id_l/rel_family_id),
+  data = year3_nona,
+  family = ziGamma(link = "log"),
+  ziformula = ~ GV.step + z.peq.vic.sum + z.puberty + age.year + sex + highest_edu + combined_income + (1|site_id_l/rel_family_id)
+)
+
+coef_hurdle_medi = munge_hurdle(hurdle_medi)
+
+write_supptab(
+  table = coef_hurdle_medi,
+  supptab = supptab, 
+  name = outname
+)
+```
+
+#. . .
+# ===================================
+# MODERATION
+# ==================================
+
+
+# ------------------
+### Relationship between PEQ (bullying) and PQB with covariates
+# > SUPPTABLE 12 <
+```{r}
+
+supptab = "SUPPTAB12"
+outname = "lmeResults-pqbc-on-peq-with-covariates"
+
+#
+
+model = 
+  abcd_policy_lmer(
+    dv = "z.pqb.distress",
+    iv = "z.peq.vic.sum",
+    covariates = covariates_master,
+    random_effects = re_master,
+    data = year3_nona
+)
+
+tab = abcd_policy_gtInterpret(
+  model = model,
+  dvlab = "PQ-BC",
+  return.table = T
+)
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+# ---------------
+## Relationship between PEQ (bullying) and PQB with covariates, adjusting for race
+# > SUPPTABLE 13 <
+```{r}
+supptab = "SUPPTAB13"
+outname = "lmeResults-pqbc-on-peq-with-covariates-andrace"
+
+#
+
+# controlling for race
+model_race = 
+  abcd_policy_lmer(
+    dv = "z.pqb.distress",
+    iv = "z.peq.vic.sum",
+    covariates = covariates_race,
+    random_effects = re_master,
+    data = year3_nona
+  )
+
+tab = abcd_policy_gtInterpret(
+  model = model_race,
+  dvlab = "PQ-BC",
+  return.table = T
+)
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+
+
+# ----------------------
+### PQB on PEQ*GV group interaction
+Moderation effect by GV group
+# > SUPPTABLE14 <
+```{r}
+supptab = "SUPPTAB14"
+outname = "lmeResults-interaction-PQBC-on-PEQbyGV"
+
+# First create unresidualized plot (plot raw values)
+ggplot(year3_nona, aes(x = z.peq.vic.sum, y = z.pqb.distress, color = GV.step)) +
+  geom_smooth(method= 'lm', se = T) + 
+  ylab('PQ-BC') + 
+  xlab('PEQ') + 
+  guides(color = guide_legend('FG Group'), fill = guide_legend('FG Group')) +
+  scale_color_manual(values = c("blue","red","darkgreen","purple"),
+                     breaks = c("Least GD","1-STEP","2-STEP","Most GD"),
+                     labels = c("Least GD (n=8240)", "1-STEP (n=825)", "2-STEP (n=491)", "Most GD (n=689)"))
+
+# ------------------------------------------
+# Next run the interaction model
+model <- abcd_policy_lmer(
+  dv = "z.pqb.distress",
+  iv = "z.peq.vic.sum * GV.step",
+  covariates = c(covariates_master),
+  random_effects = re_master,
+  data = year3_nona
+)
+
+tab = abcd_policy_gtInterpret(
+  model = model, 
+  dvlab = "PQBC", 
+  return.table = T
+)
+
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+# -------------------
+# interaction plots
+```{r, interaction-plots}
+# Run the model on raw vals
+model <- abcd_policy_lmer(
+  dv = "pqb.distress",
+  iv = "peq.vic.sum * GV.step",
+  covariates = c(covariates_master),
+  random_effects = re_master,
+  data = year3_nona
+)
+
+df_forPlot <- as.data.frame(model$model@frame)
+
+df_forPlot$pred <- predict(model$model)
+
+ggplot(df_forPlot, aes(x = peq.vic.sum, y = pred, color = GV.step)) +
+  geom_smooth(method= 'lm', se = F) + #geom_point() +
+  ylab('Psychotic-like experiences (PQ-BC)') + 
+  xlab('Bullying victimization (PEQ-Vic)') + 
+  guides(color = guide_legend('Gender diversity'), fill = guide_legend('Gender diversity')) +
+  scale_color_manual(values = c("#4daf4a", "#377eb8", "#ff7f00", "#984ea3"),
+                     breaks = c("Least GD","1-STEP","2-STEP","Most GD"),
+                     labels = c("Least GD (n=6867)", "1-STEP (n=674)", "2-STEP (n=391)", "Most GD (n=531)"))
+
+
+ggsave(
+  file.path(out_dir, "plots/interaction-plot-bullying-ples.png")
+)
+
+
+## Look only at cis, to observe directly the difference in slopes
+cis <- filter(year3_nona, GV.step == "CONGRUENT")
+mod <- lmerTest::lmer(z.pqb.distress ~ z.peq.vic.sum + z.puberty + age + sex + race_ethnicity + highest_edu + combined_income + (1|site_id_l/rel_family_id), cis)
+
+gtLmerInterpret(mod, var = "z.peq.vic.sum")
+
+
+
+## sensitivity to look at low end of vic spectrum (i.e., in the absence of bullying do GE folks differ in PQB)
+year3_nona.bin <- year3_nona %>%
+  mutate(peq.yesno = ifelse(z.peq.vic.sum < 0, 0, ifelse(peq.vic.sum > 0, 1, NA)))
+
+ggplot(filter(year3_nona.bin, !is.na(peq.yesno)), aes(fill = as.factor(peq.yesno), y = z.pqb.distress, x = GV.step)) + geom_bar(stat = 'summary', position = 'dodge')
+
+year3_nona.bin.low <- filter(year3_nona.bin, peq.yesno == 0)
+
+summary(lmer(z.pqb.distress ~ GV.step + age + z.puberty + sex + race_ethnicity + highest_edu + combined_income + (1|site_id_l/rel_family_id), year3_nona.bin.low))
+
+year3_nona.vicAbsent <- filter(year3_nona, peq.vic.sum == 9)
+gtLmerInterpret(lmer(z.pqb.distress ~ GV.step + age + z.puberty + sex+ race_ethnicity + highest_edu + combined_income + (1|site_id_l/rel_family_id), year3_nona.vicAbsent), ci = F)
+
+```
+
+# ----------------
+# Hurdle models, x-sect interaction
+# > SUPPTABLE15 <
+```{r}
+supptab = "SUPPTAB15"
+outname = "hurdle-xsect-interaction"
+
+
+hurdle_xsect_interaction = glmmTMB(
+  formula = pqb.distress ~ peq.vic.sum*GV.step + age.year + sex + z.puberty + highest_edu + combined_income + (1|site_id_l/rel_family_id),
+  data = year3_nona,
+  family = ziGamma(link = "log"),
+  ziformula = ~ peq.vic.sum*GV.step + age.year + sex + z.puberty + highest_edu + combined_income + (1|site_id_l/rel_family_id)
+)
+
+coef_hurdle_xsect_interaction = munge_hurdle(hurdle_xsect_interaction)
+
+write_supptab(
+  table = coef_hurdle_xsect_interaction,
+  supptab = supptab,
+  name = outname
+)
+```
+
+
+# ----------------
+# Diagnostics for x-sectional null interaction  
+The interaction effect is null in the hurdle models which represents a change from the interpretation of the linear models. Here we explore some components of this relationship to clarify what happened.
+```{r, interaction-hurdle-explorations}
+coef = summary(hurdle_xsect_interaction)$coefficients$cond
+
+# logistic
+check_data = year3_nona
+check_data$pqb.zero = ifelse(year3_nona$pqb.distress == 0, 0, 1)
+
+logmod = glmer(pqb.zero ~ peq.vic.sum*GV.step + age.year + sex + z.puberty + highest_edu + combined_income + (1|site_id_l/rel_family_id),
+             data = check_data, family = "binomial")
+
+# nonzero
+check_data$pqb.pos = ifelse(year3_nona$pqb.distress > 0, 1, 0)
+
+check_data_filt <- filter(check_data, pqb.pos == 1)
+check_data_filt$log.pqb = log(check_data_filt$pqb.distress)
+
+linmod = lmer(pqb.distress ~ z.peq.vic.sum*GV.step + age.year + sex + z.puberty + highest_edu + combined_income + (1|site_id_l/rel_family_id), data = check_data_filt)
+
+summary(linmod)$coefficients
+
+model$model@call
+
+remod <- lmer(pqb.distress ~ peq.vic.sum * GV.step + age.year + sex + z.puberty + highest_edu + combined_income + (1|site_id_l/rel_family_id), data = year3_nona)
+
+library(merDeriv)
+sourdough <- bread(remod, full = F)
+
+library(clubSandwich)
+check = sandwich(x = remod, bread = sourdough, meat = meat(remod, level = 2))
+
+
+pqb_arr = dplyr::arrange(year3_nona, -pqb.distress)
+pqb_arr = dplyr::arrange(year3_nona, -peq.vic.sum)
+
+df = pqb_arr
+pts = c()
+peas = c()
+bees=c()
+for (i in 1:100) {
+  pts[i] = pqb_arr$subjectkey[i]
+  df = df[!df$subjectkey %in% pts, ]
+  mod = summary(lmer(pqb.distress ~ peq.vic.sum * GV.step + age.year + sex + z.puberty + highest_edu + combined_income + (1|site_id_l/rel_family_id), data = df))$coefficients
+  peas[i] = mod[13,5]
+  bees[i] = mod[13,1]
+  cat(sprintf("\r%d       ", i))
+  flush.console()
+}
+
+logpeas = -log10(peas)
+
+dfplot = data.frame(pts, peas, logpeas, bees)
+dfplot$x = 1:nrow(dfplot)
+
+dfplot_flip = tidyr::pivot_longer(dfplot, cols = c("logpeas","bees"))
+
+ggplot(dfplot_flip, aes(x = x, y = value)) +
+  geom_line() + geom_point() + facet_wrap(~name, scales = "free")# +
+  geom_hline(color = "red", linetype = "dotdash", yintercept = 1.3)
+
+difs = diff(dfplot$logpeas)
+dfplot$logpeas_diff = c(NA, difs)
+
+ridPts = dfplot$pts[1:50]
+
+checkdata = filter(year3_nona, subjectkey %in% ridPts) %>%
+  dplyr::select(subjectkey, eventname, age.year, sex, gender.identity, GV.step, pqb.distress)
+
+#savesubs = ridPts
+
+
+linmod = lmer(pqb.distress ~ peq.vic.sum*GV.step + age.year + sex + z.puberty + highest_edu + combined_income + (1|site_id_l/rel_family_id), data = check_data_filt)
+
+
+library(emmeans)
+
+xgrid <- seq(
+  from = quantile(year3_nona$peq.vic.sum, .10, na.rm = TRUE),
+  to   = quantile(year3_nona$peq.vic.sum, .90, na.rm = TRUE),
+  length.out = 25
+)
+
+emm_raw <- emmeans(
+  linmod,
+  ~ GV.step | peq.vic.sum,
+  at = list(peq.vic.sum=xgrid)
+)
+
+delta_raw <- contrast(emm_raw, method = "trt.vs.ctrl")
+delta_df <- as.data.frame(delta_raw)
+
+ggplot(delta_df, aes(x = peq.vic.sum, y = estimate, color = contrast)) +
+  geom_point()
+
+ggplot(check_data_filt, aes(x = peq.vic.sum, y = pqb.distress, color = GV.step)) + 
+  geom_smooth(method = 'lm', se = F) + geom_point()
+
+emm_hurd <- emmeans(
+  hurdle_xsect_interaction,
+  ~ GV.step | peq.vic.sum,
+  at = list(peq.vic.sum = xgrid),
+  type = "response"
+)
+
+ratio_hurd <- contrast(emm_hurd, method = "trt.vs.ctrl")
+ratio_df = as.data.frame(ratio_hurd)
+
+ggplot(ratio_df, aes(x = peq.vic.sum, y = estimate, color = contrast)) +
+  geom_line()
+  
+
+
+check = data.frame("x" = 1:100)
+check$log = log(check$x)  
+
+ggplot(check, aes(x = x, y = log)) + geom_line() + geom_abline(intercept = 0, slope = 1)
+
+check = data.frame("pqb" = rep(check_data_filt$pqb.distress, 2), "type" = rep(c("log","lin"), each = nrow(check_data_filt)))
+check$val = c(log(check_data_filt$pqb.distress), check_data_filt$pqb.distress)
+
+ggplot(check, aes(x = pqb, y = val, color = type)) + geom_line()
+```
+
+
+# --------------
+# total Psychopathology-PEQ relationship by GV group
+# > SUPPTABLE16 <
+
+```{r}
+supptab = "SUPPTAB16"
+outname = "relationship-btwn-peq-and-bpmtot-with-covariates"
+
+## Average effects
+model = 
+  abcd_policy_lmer(
+    dv = "z.bpm.total",
+    iv = "z.peq.vic.sum",
+    covariates = covariates_master,
+    random_effects = re_master,
+    data = year3_nona
+)
+
+tab = abcd_policy_gtInterpret(
+  model = model,
+  dvlab = "BPM total",
+  return.table = T
+)
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+# ----------------
+## Interaction
+# > SUPPTABLE17 <
+```{r}
+supptab = "SUPPTAB17"
+outname = "moderation-effect-by-gv-group-bpmtotal"
+
+## Interaction
+model_interact = abcd_policy_lmer(
+  dv = "z.bpm.total",
+  iv = "z.peq.vic.sum * GV.step",
+  covariates = covariates_master,
+  random_effects = re_master,
+  data = year3_nona
+)
+
+tab = abcd_policy_gtInterpret(model = model_interact, dvlab = "BPM total", return.table = T)
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+#. . .
+# =====================
+## State policy cross-sectional
+# ======================
+
+#--------------
+## Bullying high vs low support
+```{r}
+
+# with gini (i.e., included in covariates_policy object defined above)
+model_withgini_peq = abcd_policy_lmer(
+  dv = "z.peq.vic.sum",
+  iv = "gid_tally_prop_bin",
+  covariates = covariates_policy,
+  random_effects = re_master,
+  data = year3_nona
+)
+
+abcd_policy_gtInterpret(model = model_withgini_peq, dvlab = "PEQ Victimization")
+
+
+# Interaction with felt-gender group
+model_interaction_peq = abcd_policy_lmer(
+  dv = "z.peq.vic.sum",
+  iv = "gid_tally_prop_bin * GV.step",
+  covariates = covariates_policy,
+  random_effects = re_master,
+  data = year3_nona
+)
+
+abcd_policy_gtInterpret(model = model_interaction_peq, dvlab = "PEQ Victimization")
+
+# min only
+minonly = year3_nona %>% filter(GV.step == "Most GD")
+
+model_min_peq = abcd_policy_lmer(
+  dv = "z.peq.vic.sum",
+  iv = "gid_tally_prop_bin",
+  covariates = covariates_policy,
+  random_effects = re_master,
+  data = minonly
+)
+
+abcd_policy_gtInterpret(model = model_min_peq, dvlab = "PEQ")
+```
+
+## PQB in high vs low states
+```{r}
+model_withgini_pqb <- abcd_policy_lmer(
+  dv = "z.pqb.distress",
+  iv = "gid_tally_prop_bin",
+  covariates = covariates_policy,
+  random_effects = re_master,
+  data = year3_nona
+)
+
+abcd_policy_gtInterpret(model = model_withgini_pqb, dvlab = "PQBC")
+
+# interaction
+model_interaction_pqb = abcd_policy_lmer(
+  dv = "z.pqb.distress",
+  iv = "gid_tally_prop_bin * GV.step",
+  covariates = covariates_policy,
+  random_effects = re_master,
+  data = year3_nona
+)
+
+abcd_policy_gtInterpret(model = model_interaction_pqb, dvlab = "PQBC")
+
+
+# in min only
+minonly = year3_nona %>% filter(GV.step == "Most GD")
+
+model_min_pqb = abcd_policy_lmer(
+  dv = "z.pqb.distress",
+  iv = "gid_tally_prop_bin",
+  covariates = covariates_policy,
+  random_effects = re_master,
+  data = minonly
+)
+
+abcd_policy_gtInterpret(model = model_min_pqb, dvlab = "PQB")
+
+```
+
+# -----------------
+# > SUPPTABLE18 <
+We'll output a table here with 3 rows and 6 columns. Rows will reference specific terms from models (e.g., state policy - high vs low contrast); columns will represent statistics from those models with column 1 and 4 representing coefficient estimates, 2 and 5 p-values, and 3 and 6 confidence intervals. The columns are divided into two supercolumns (?): the left 3 represent statistics from models with PQ-BC as the dependent variable; the right 3 represent statistics from models with PEQ-Vic as the dependent variable. Row, column, and supercolumn names are adjusted manually in Word and will not appear in the output table.
+
+We choose not to report full statistics in the supplement so as to avoid inundating readers with extraneous information. All of the effects reported and interpreted here are null (or small and significant in 1 case). Full model statistics can be accessed via this script (i.e., running the above 2 chunks)
+```{r}
+supptab = "SUPPTAB18"
+outname = "cross-sect-policy-on-ple-and-peq"
+
+# - First save coefficients in easily accessible variables
+pqbMod1_coef = abcd_policy_gtInterpret(model_withgini_pqb, return.table = T, dvlab = "")$raw_table
+pqbMod2_coef = abcd_policy_gtInterpret(model_interaction_pqb, return.table = T, dvlab = "")$raw_table
+pqbMod3_coef = abcd_policy_gtInterpret(model_min_pqb, return.table = T, dvlab = "")$raw_table
+
+peqMod1_coef = abcd_policy_gtInterpret(model_withgini_peq, return.table = T, dvlab = "")$raw_table
+peqMod2_coef = abcd_policy_gtInterpret(model_interaction_peq, return.table = T, dvlab = "")$raw_table
+peqMod3_coef = abcd_policy_gtInterpret(model_min_peq, return.table = T, dvlab = "")$raw_table
+
+row1 = c(
+  pqbMod1_coef[2,1], pqbMod1_coef[2,3], pqbMod1_coef[2,4],
+  peqMod1_coef[2,1], peqMod1_coef[2,3], peqMod1_coef[2,4]
+)
+
+row2 = c(
+  pqbMod2_coef[14,1], pqbMod2_coef[14,3], pqbMod2_coef[14,4],
+  peqMod2_coef[14,1], peqMod2_coef[14,3], peqMod2_coef[14,4]
+)
+
+row3 = c(
+  pqbMod3_coef[2,1], pqbMod3_coef[2,3], pqbMod3_coef[2,4],
+  peqMod3_coef[2,1], peqMod3_coef[2,3], peqMod3_coef[2,4]
+)
+
+supptab_df = rbind(row1, row2, row3)
+colnames(supptab_df) = c("b1","p1","ci1","b2","p2","ci2")
+
+write_supptab(
+  table = supptab_df,
+  supptab = supptab,
+  name = outname,
+  row.names = F
+)
+
+```
+
+
+# ---------------------
+#### Interaction of felt-gender, law, and bullying on PQB
+# > SUPPTABLE 19 <
+```{r}
+supptab = "SUPPTAB19"
+outname = "moderation-effect-gv-law-pqb-with-covariates"
+
+
+model_3way_interaction = abcd_policy_lmer(
+  dv = "z.pqb.distress",
+  iv = "GV.step * gid_tally_prop_bin * z.peq.vic.sum",
+  covariates = covariates_policy,
+  random_effects = re_master,
+  data = year3_nona
+)
+
+tab = abcd_policy_gtInterpret(model = model_3way_interaction, dvlab = "PQBC", return.table = T)
+
+tab$gt_table %>%
+  tab_options(table.font.size = px(12))
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+# ------------------
+# min only: Interaction of policy and bullying on PQB 
+# > SUPPTABLE20 <
+```{r}
+supptab = "SUPPTAB20"
+outname = "moderation-effect-law-pqb-with-covariates-minonly"
+
+min_only <- filter(year3_nona, GV.step == "Most GD")
+
+model_2way_interaction = abcd_policy_lmer(
+  dv = "z.pqb.distress",
+  iv = "gid_tally_prop_bin * z.peq.vic.sum",
+  covariates = covariates_policy,
+  random_effects = re_master,
+  data = min_only
+)
+
+tab = abcd_policy_gtInterpret(
+  model = model_2way_interaction,
+  dvlab = "PQBC",
+  return.table = T
+)
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+
+```
+
+
+
+
+#. . .
+# ===============================
+# Longitudinal
+# ==============================
+
+# --------
+# MAKE MASTER NONA
+```{r}
+
+nona_filters = c("subjectkey","eventname","site_id_l","rel_family_id","age.year","GV.step","time.point", covariates_long_policy, "z.pqb.distress", "pqb.distress")
+
+master_nona <- na.omit(master[,nona_filters]) %>%
+  left_join(., dplyr::select(master, subjectkey, eventname,
+                             delta.GID.Levels, delta.GID.Levels.1t3,
+                             gish.sum, express.gender.cnt, noncontent.gender.cnt,
+                             z.peq.vic.sum, z.bpm.total),
+            by = c("subjectkey", "eventname")) 
+
+  
+```
+
+
+# -------------------
+### changes in PQB across all groups
+# > SUPPTABLE21 <
+```{r}
+supptab = "SUPPTAB21"
+outname = "time-changes-pqb-all-groups"
+
+model <- abcd_policy_lmer(
+  dv = "z.pqb.distress",
+  iv = "time.point",
+  covariates = covariates_long,
+  random_effects = re_long,
+  data = master_nona,
+  increase.tol = T
+)
+
+tab = abcd_policy_gtInterpret(model, dvlab = "PQBC", return.table = T)
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+# ----------------
+### changes in PQB by GV step
+# > SUPPTABLE22 <
+```{r}
+
+supptab = "SUPPTAB22"
+outname = "time-changes-pqb-byPQB"
+
+model_timeinteraction = abcd_policy_lmer(
+  dv = "z.pqb.distress",
+  iv = "GV.step * time.point",
+  covariates = c(covariates_long),
+  random_effects = re_long,
+  data = master_nona,
+  increase.tol = T
+)
+
+tab = abcd_policy_gtInterpret(model = model_timeinteraction, dvlab = "PQBC", return.table = T)
+
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+
+
+ggplot(master, aes(x = time.point, y = z.pqb.distress, color = GV.step)) + geom_smooth(method = 'lm', se = F) + ylab('PQB') + xlab('Time') + guides(color=guide_legend("FG Group"))
+```
+
+
+# ---------
+## 3-way interaction: PQB over time by gv by state policy
+
+
+# > SUPPTABLE 23 <
+```{r}
+supptab = "SUPPTAB23"
+outname = "long-policy-gv-interaction-table"
+
+model_time_policy_interaction = abcd_policy_lmer(
+  dv = "z.pqb.distress",
+  iv = "GV.step * time.point * delta.GID.Levels",
+  covariates = covariates_long_policy,
+  random_effects = "(time.point | site_id_l/rel_family_id/subjectkey)",
+  data = master_nona,
+  increase.tol = T
+)
+
+tab = abcd_policy_gtInterpret(
+  model_time_policy_interaction,
+  dvlab = "PQ-BC",
+  return.table = T
+)
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+# -------------------
+# Plotting long policy interaction models
+# > FIGURE 4 <
+Plotting with raw values
+```{r, plotting-long-policy-pred-vals}
+
+model_time_policy_interaction = abcd_policy_lmer(
+  dv = "pqb.distress",
+  iv = "GV.step * time.point * delta.GID.Levels",
+  covariates = covariates_long_policy,
+  random_effects = "(time.point | site_id_l/rel_family_id/subjectkey)",
+  data = master_nona,
+  increase.tol = T
+)
+
+df_forPlot = as.data.frame(model_time_policy_interaction$model@frame)
+
+df_forPlot$delta.GID.Levels = factor(
+  df_forPlot$delta.GID.Levels,
+  levels = c("LowNoChange","Increased","HighNoChange")
+)
+
+df_forPlot$pred = predict(model_time_policy_interaction$model)
+
+# filter for only CON and MIN
+df_forPlot_MAIN = df_forPlot %>%
+  filter(GV.step %in% c("Least GD","Most GD"))
+
+# plot predicted values for Least and Most GD only
+ggplot(df_forPlot_MAIN, aes(x = time.point, y = pred, color = delta.GID.Levels)) +
+  geom_smooth(method = 'lm', se = F) + 
+  facet_wrap(~GV.step) +
+  xlab("Time (collection wave)") +
+  ylab("Psychotic-like experiences (PQ-BC)") +
+  guides(color = guide_legend('Policy')) +
+  scale_color_manual(
+    values = c("hotpink","darkseagreen","gray0"),
+    breaks = c("LowNoChange","Increased","HighNoChange"),
+    labels = c("Consistently Low Support", "Increasing Support", "Consistently High Support")
+  ) +
+  scale_y_continuous(
+    breaks = 0:12
+  ) +
+  theme(text = element_text(family = "Times New Roman"))
+
+ggsave(file.path(out_dir, "plots/FIGURE4_main-policy-long-interaction-by-gvGroup.svg"))
+
+ggsave(file.path(out_dir, "plots/FIGURE4_main-policy-long-interaction-by-gvGroup.png"))
+
+
+# plot predicted values for all groups for supp
+ggplot(df_forPlot, aes(x = time.point, y = pred, color = delta.GID.Levels)) +
+  geom_smooth(method = 'lm', se = F) +
+  facet_wrap(~GV.step) +
+  xlab("Time (collection wave)") +
+  ylab("Psychotic-like experiences (PQ-BC)") +
+  guides(color = guide_legend("Policy")) +
+  scale_color_manual(
+    values = c("hotpink","darkseagreen","gray0"),
+    breaks = c("LowNoChange","Increased","HighNoChange"),
+    labels = c("Consistently Low Support", "Increasing Support","Consistently High Support") 
+  ) +
+  scale_y_continuous(
+    #breaks = seq(0,12, by = 2)
+    breaks = 0:12
+  ) +
+  theme(text = element_text(family = "Times New Roman"))
+
+ggsave(file.path(out_dir, "plots/supp-policy-long-interaction-by-gvGroup.png"))
+```
+
+# ------------
+# Hurdle: 3-way interaction
+# > SUPPTABLE24 <
+```{r}
+supptab = "SUPPTAB24"
+outname = "hurdle-long-policy-interaction"
+
+hurdle_long = glmmTMB(
+  formula = pqb.distress ~ GV.step*time.point*delta.GID.Levels + z.puberty + sex + highest_edu + combined_income + gini + (1|site_id_l/rel_family_id/subjectkey),
+  data = master_nona,
+  family = ziGamma(link = "log"),
+  ziformula = ~ GV.step*time.point*delta.GID.Levels + z.puberty + sex + highest_edu + combined_income + gini + (1|site_id_l/rel_family_id/subjectkey)
+)
+
+
+coef_hurdle_long = munge_hurdle(hurdle_long)
+
+write_supptab(
+  table = coef_hurdle_long,
+  supptab = supptab,
+  name = outname
+)
+```
+
+
+# ------------
+# 3-way interaction long policy, y1 through y3
+# > SUPPTABLE25 <
+```{r}
+supptab = "SUPPTAB25"
+outname = "long-policy-gv-interaction-table-y1t3"
+
+model_time_policy_interaction = abcd_policy_lmer(
+  dv = "z.pqb.distress",
+  iv = "GV.step * time.point * delta.GID.Levels.1t3",
+  covariates = covariates_long_policy,
+  random_effects = "(time.point | site_id_l/rel_family_id/subjectkey)",
+  data = master_nona,
+  increase.tol = T
+)
+
+tab = abcd_policy_gtInterpret(
+  model_time_policy_interaction,
+  dvlab = "PQ-BC",
+  return.table = T
+)
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+# --------------
+# Most GD only, long policy
+# > SUPPTABLE26 <
+```{r}
+
+supptab = "SUPPTAB26"
+outname = "long-policy-timeinteraction-min-only"
+
+# - min only
+min_only = master_nona %>% filter(GV.step == "Most GD")
+
+model_time_policy_interaction_minonly = abcd_policy_lmer(
+  dv = "z.pqb.distress",
+  iv = "time.point * delta.GID.Levels",
+  covariates = covariates_long_policy,
+  random_effects = "(1|site_id_l/rel_family_id/subjectkey)",
+  data = min_only,
+  increase.tol = T
+)
+
+tab = abcd_policy_gtInterpret(model = model_time_policy_interaction_minonly, dvlab = "PQBC", return.table = T)
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+
+# -----------
+# Iterative supplementary
+
+First we make a dataset
+```{r}
+forIterate <- master_nona %>%
+  filter(!is.na(delta.GID.Levels))
+
+# Build model to get PQB residuals after accounting for covariates and multi-level structure
+modelcheck <- lmer(z.pqb.distress ~ sex + z.puberty + highest_edu + combined_income + (time.point|site_id_l/rel_family_id/subjectkey), forIterate, control = lmerControl(
+    optimizer="bobyqa",
+    optCtrl=list(maxfun=2e5)
+  ))
+
+forIterate$residuals = resid(modelcheck)
+```
+
+Next we observe PQB changes over time by GV step group (con, 1-step, 2-step, minority)
+```{r}
+fgLevs = levels(as.factor(forIterate$GV.step))
+policyLevs = levels(as.factor(forIterate$delta.GID.Levels))
+combin <- length(fgLevs) * length(policyLevs)
+
+effects = data.frame("Group" = rep(NA, combin),
+                     "Effects" = rep(NA, combin), 
+                     "P" = rep(NA, combin),
+                     "lowCI" = rep(NA, combin),
+                     "highCI" = rep(NA, combin),
+                     "N" = rep(NA, combin),
+                     "uniqueN" = rep(NA, combin),
+                     "averageData" = rep(NA, combin))
+
+count = 1
+for (fg in fgLevs) {
+  for (policy in policyLevs) {
+    
+    effects[count, "Group"] = paste(fg, policy, sep = ":")
+    
+    data = forIterate[which(forIterate$GV.step == fg & forIterate$delta.GID.Levels == policy), ]
+    data$rel_family_id = as.factor(data$rel_family_id)
+    data$combined_income = as.integer(data$combined_income)
+    
+    
+    check <- group_by(data, subjectkey) %>%
+      mutate(size = length(subjectkey)) %>%
+      ungroup() %>%
+      group_by(rel_family_id) %>%
+      mutate(fam.size = length(rel_family_id)) %>%
+      ungroup() %>%
+      group_by(site_id_l) %>%
+      mutate(site_id_l.size = length(site_id_l)) %>%
+      ungroup() #%>%
+      #filter(size > 1) ## this line restricts the analysis to folks who were in the FG min group for at least x timepoints where x is the number you filter by. So if x = 1, then we only include folks who identified as FG min for at least 2 timepoints
+    
+    print(table(check$size))
+    
+    effects[count, "N"] = nrow(check)
+    effects[count, "uniqueN"] = length(unique(check$subjectkey))
+    effects[count, "averageData"] = mean(check$size, na.rm=T)
+    
+    model <- lm(residuals ~ time.point, check)
+    
+    summ <- summary(model)$coefficients
+    
+    effects[count, "Effects"] = summ[2,1]
+    effects[count, "P"] = summ[2,4]
+    
+    ci = confint(model)
+
+    effects[count, "lowCI"] = round(ci[2,1], 3)
+    effects[count, "highCI"] = round(ci[2,2], 3)
+
+    count = count + 1
+  }
+}
+
+effects$fdr = p.adjust(effects$P, n = nrow(effects), method = 'fdr')
+
+effects
+```
+
+# > SUPPTABLE27 <
+```{r}
+supptab = "SUPPTAB27"
+outname = "iterative-supp-for-long-policy"
+
+effects.table = data.frame("Group" = effects$Group,
+                           "ß" = round(effects$Effects, 3),
+                           "CI" = paste0("[", effects$lowCI, ", ", effects$highCI, "]"),
+                           "P" = ifelse(effects$fdr < 0.05, paste0(format(effects$P, digits = 3, scientific = T), "*"),
+                                        round(effects$P, 3)),
+                           "GV_group" = rep(c("Least Gender Diverse", "1-step", "2-step", "Most Gender Diverse"), each = 3),
+                           "GID_group" = rep(c("High support, no change (H-H)","Increased support","Low support, no change (L-L)"), 4)) %>%
+  select(-Group)
+
+effects.table %>%
+  gt(groupname_col = "GID_group", rowname_col = "GV_group") %>%
+  tab_footnote(footnote = "* represents significance after FDR correction for multiple comparisons") %>%
+  tab_style(style = cell_text(font = "Times New Roman", weight = "bold"),
+            locations = list(cells_column_labels(), cells_row_groups())) %>%
+  tab_style(style = cell_text(font = "Times New Roman"),
+            locations = list(cells_body(), cells_stub(), cells_footnotes())) %>%
+  tab_stub_indent(rows = c(1:12), indent = 5) %>%
+  cols_label(CI = "95% CI")
+
+write_supptab(
+  table = effects.table,
+  supptab = supptab,
+  name = outname,
+  row.names=F
+)
+```
+
+# ------------
+# simr power test
+```{r}
+
+power_test = powerSim(model_time_policy_interaction$model, simr::fixed("GV.stepMost GD:time.point:delta.GID.LevelsLowNoChange", "t"), nsim = 1000)
+
+saveRDS(power_test, "/Users/dylanhughes/Documents/psychosis_gender_project/abcd/manuscript/package/outputs/simr_3way_policy_interaction.rds")
+
+power_test = readRDS("/Users/dylanhughes/Documents/psychosis_gender_project/abcd/manuscript/package/outputs/simr_3way_policy_interaction.rds")
+
+```
+
+
+
+# -----------
+# bullying 3-way interaction over time
+```{r}
+model_time_policy_interaction_onBully = abcd_policy_lmer(
+  dv = "z.peq.vic.sum",
+  iv = "GV.step * time.point * delta.GID.Levels",
+  covariates = covariates_long_policy,
+  random_effects = "(time.point | site_id_l/rel_family_id/subjectkey)",
+  data = master_nona,
+  increase.tol = T
+)
+
+tab = abcd_policy_gtInterpret(
+  model_time_policy_interaction_onBully,
+  dvlab = "PQ-BC",
+  return.table = T
+)
+```
+
+# -------------
+# BPM Total
+```{r}
+supptab = "SUPPTAB28"
+outname = "long-policy-timeinteraction-bpmtotal"
+
+model <- abcd_policy_lmer(
+  dv = "z.bpm.total",
+  iv = "GV.step * time.point * delta.GID.Levels",
+  covariates = covariates_long_policy,
+  random_effect = re_long,
+  data = master_nona,
+  increase.tol = T
+)
+
+tab = 
+  abcd_policy_gtInterpret(model = model, dvlab = "BPM total", return.table = T)
+
+write_supptab(
+  table = tab$raw_table,
+  supptab = supptab,
+  name = outname
+)
+```
+
+
+

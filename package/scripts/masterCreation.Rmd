@@ -1,0 +1,729 @@
+---
+title: "masterCreation"
+author: "Dylan Hughes"
+date: "2023-07-12"
+output: html_document
+---
+
+This script collates data for felt-gender analysis in ABCD. 
+```{r}
+print(paste0("Last run: ", date()))
+```
+
+
+```{r setup, warning=F}
+library(conflicted)
+library(ggplot2)
+library(diagram)
+library(devtools)
+
+conflict_prefer("recode","dplyr")
+devtools::document('~/Documents/GitHub/dylanfuncs/dylanfuncs/')
+library(car)
+library(lme4)
+library(mediation)
+library(gt)
+library(dplyr)
+library(nlme)
+library(RColorBrewer)
+library(gridExtra)
+library(knitr)
+library(ggrepel)
+
+conflict_prefer('filter','dplyr')
+conflict_prefer('select','dplyr')
+```
+
+
+# ---- SETUP ----
+Initialize directory pointing to ABCD-derived variables.  
+In this version we assume the data are structured in the way they are downloaded directly from ABCD i.e., within top directory abcd-data-release-VERSION/core, there are subdirectories: abcd-general, gender-identity-sexual-health)
+```{r, abcd-derived-vars}
+abcd_wd = "/Users/dylanhughes/Documents/abcd/abcd-data-release-5.1/core"
+```
+
+Initialize directory pointing to directory specific to this project.
+```{r, project-specific-directory}
+proj_dir = "/Users/dylanhughes/Documents/psychosis_gender_project/abcd/manuscript/package/"
+```
+
+
+
+```{r demographics}
+
+pdemo <- read.csv(file.path(abcd_wd, "abcd-general/abcd_p_demo.csv")) %>%
+  rename(subjectkey = src_subject_id)
+
+ltdemo <- read.csv(file.path(abcd_wd, "abcd-general/abcd_y_lt.csv")) %>%
+  rename(subjectkey = src_subject_id)
+
+## Race, income, and highest education from Year 1 data
+year1_demo <- pdemo %>%
+  rename(combined_income = demo_comb_income_v2_l) %>%
+  filter(eventname == "1_year_follow_up_y_arm_1") %>%
+  mutate(highest_edu = ifelse(is.na(demo_prnt_ed_v2_l) & is.na(demo_prtnr_ed_v2_l), NA,
+                              ifelse(is.na(demo_prnt_ed_v2_l) & !is.na(demo_prtnr_ed_v2_l), demo_prtnr_ed_v2_l,
+                                     ifelse(!is.na(demo_prnt_ed_v2_l) & is.na(demo_prtnr_ed_v2_l), demo_prnt_ed_v2_l,
+                                            ifelse(demo_prnt_ed_v2_l > demo_prtnr_ed_v2_l, demo_prnt_ed_v2_l,
+                                                   ifelse(demo_prnt_ed_v2_l < demo_prtnr_ed_v2_l, demo_prtnr_ed_v2_l,
+                                                          ifelse(demo_prnt_ed_v2_l == demo_prtnr_ed_v2_l, demo_prnt_ed_v2_l, NA))))))) %>%
+  select(subjectkey, combined_income, highest_edu)
+
+year1_demo$highest_edu[year1_demo$highest_edu %in% c(777, 999)] = NA
+year1_demo$combined_income[year1_demo$combined_income %in% c(777, 999)] = NA
+
+
+# RACE
+race <- pdemo %>%
+  filter(eventname == "baseline_year_1_arm_1") %>%
+  # WHITE
+  mutate(white = ifelse(demo_race_a_p___10 == 1, 1, 
+                        ifelse(demo_race_a_p___10 == 0, 0, NA))) %>%
+  # BLACK
+  mutate(black = ifelse(demo_race_a_p___11 == 1, 1, 
+                       ifelse(demo_race_a_p___11 == 0, 0, NA))) %>%
+  # ASIAN
+  mutate(asian = ifelse(demo_race_a_p___18 == 1 | # Asian indian
+                          demo_race_a_p___19 == 1 | # chinese
+                          demo_race_a_p___20 == 1 | # Filipino
+                          demo_race_a_p___21 == 1 | #Japanese
+                          demo_race_a_p___22 == 1 | # Korean
+                          demo_race_a_p___23 == 1 | # Vietnamese
+                          demo_race_a_p___24 == 1, 1, 0)) %>% # Other Asian
+  # American indian and alaska native
+  mutate(aian = ifelse(demo_race_a_p___12 == 1 | # American Indian
+                         demo_race_a_p___13 == 1, 1, 0)) %>%  # Native Alaskan
+  # Native hawaiian and other pacific
+  mutate(nhpi = ifelse(demo_race_a_p___14 == 1 | # Native Hawaiian
+                         demo_race_a_p___15 == 1 | # Guamanian
+                         demo_race_a_p___16 == 1 | # Samoan
+                         demo_race_a_p___17 == 1, 1, 0)) %>% # Other pacific islander
+  # other
+  mutate(other.race = ifelse(demo_race_a_p___25 == 1, 1, 0)) %>% # other race
+  # MIXED
+  mutate(mixed = ifelse((white + black + asian + aian + nhpi + other.race) > 1, 1, 0)) %>%
+  
+  #... aggregating...
+  
+  # 4 level
+  mutate(race.4level = ifelse(aian == 1 | 
+                                nhpi == 1 | 
+                                other.race == 1 | 
+                                mixed == 1, "Other/Mixed",
+                              ifelse(white == 1, "White",
+                                     ifelse(black == 1, "Black",
+                                            ifelse(asian == 1, "Asian", NA))))) %>%
+  
+  # 6 level
+  mutate(race.6level = ifelse(mixed == 1, "Mixed", 
+                              ifelse(white == 1, "White", 
+                                     ifelse(black == 1, "Black",
+                                            ifelse(asian == 1, "Asian", 
+                                                   ifelse(aian == 1|
+                                                            nhpi == 1, "AIAN/NHPI",
+                                                          ifelse(other.race == 1, "Other", NA))))))) %>%
+  
+  # Hispanic
+  mutate(hispanic = ifelse(demo_ethn_v2 == 777 | demo_ethn_v2 == 999, NA,
+                           ifelse(demo_ethn_v2 == 1, "Hispanic",
+                                  ifelse(demo_ethn_v2 == 2, "Non-Hispanic", NA)))) %>%
+  select(subjectkey, race.4level, race.6level, hispanic)
+
+
+## Birth-assigned sex at baseline (does not exist in later waves)
+sex <- pdemo %>%
+  rename(sex = demo_sex_v2) %>%
+  filter(eventname == "baseline_year_1_arm_1") %>%
+  select(subjectkey, sex)
+
+## Gender identity at each wave
+gid_dict <- data.frame("num" = 1:6, "label" = c("Male","Female","Trans Male","Trans Female","Gender Queer","Different"))
+
+genderId <- pdemo %>%
+  mutate(gender.identity.num = ifelse(eventname == "baseline_year_1_arm_1", demo_gender_id_v2,
+                                  ifelse(eventname != "baseline_year_1_arm_1", demo_gender_id_v2_l, NA))) %>%
+  left_join(., sex, multiple = "all") %>%
+  select(subjectkey, eventname, gender.identity.num, sex)
+genderId$gender.identity = case_match(genderId$gender.identity.num,
+                                      1 ~ "Male",
+                                      2 ~ "Female",
+                                      3 ~ "Trans Male",
+                                      4 ~ "Trans Female",
+                                      5 ~ "Gender Queer",
+                                      6 ~ "Different")
+
+
+genderId$two.step.method = 
+  ifelse(
+    genderId$sex == 1 & genderId$gender.identity == "Male","Cis",
+    
+    ifelse(
+      genderId$sex == 2 & genderId$gender.identity == "Female", "Cis",
+      
+      ifelse(
+        genderId$sex == 1 & genderId$gender.identity != "Female", "GE",
+        
+        ifelse(
+          genderId$sex == 2 & genderId$gender.identity != "Male", "GE",
+          
+          ifelse(!is.na(genderId$gender.identity), "GE", NA)     
+        )
+      )
+    )
+  )
+  
+
+## Family ID
+family <- ltdemo %>%
+  filter(eventname == "baseline_year_1_arm_1") %>%
+  select(subjectkey, rel_family_id)
+
+## Site id, interview_date, interview_age
+otherdemo <- ltdemo %>%
+  select(subjectkey, eventname, site_id_l, interview_date, interview_age) %>%
+  filter(eventname %in% c("baseline_year_1_arm_1","1_year_follow_up_y_arm_1", "2_year_follow_up_y_arm_1", "3_year_follow_up_y_arm_1", "4_year_follow_up_y_arm_1"))
+
+## Combine data
+fulldemo <- left_join(otherdemo, genderId, by = c("subjectkey", "eventname")) %>%
+  left_join(.,family, by = 'subjectkey') %>%
+  left_join(., year1_demo, by = "subjectkey") %>%
+  left_join(., race, by = "subjectkey")
+```
+
+## GISH
+
+Add GISH
+```{r gish}
+gid <- read.csv(file.path(abcd_wd, 'gender-identity-sexual-health/gish_y_gi.csv')) %>%
+  rename(subjectkey = src_subject_id) %>%
+  select(subjectkey, eventname, gish_m1_y, gish_m2_y, gish_f1_y, gish_f2_y, gish_m3_y, gish_m4_y, gish_f3_y, gish_f4_y, gish_y_ss_m_avg, gish_y_ss_f_avg, kbi_gender, kbi_y_trans_id, kbi_y_trans_prob) %>%
+  left_join(., sex, by = 'subjectkey','eventname')%>%
+  getridofnas(.,c(999,777,'')) %>%
+  
+  # Relabeling so that gish labels are standardized regardless of reported sex assigned at birth
+  mutate(gish1m = ifelse(gish_m1_y == 5, 1, ifelse(gish_m1_y == 4, 2, ifelse(gish_m1_y == 3, 3, ifelse(gish_m1_y == 2, 4, ifelse(gish_m1_y == 1, 5, ifelse(gish_m1_y == 0, 0, NA)))))))%>%
+  mutate(gish2m = ifelse(gish_m2_y == 5, 1, ifelse(gish_m2_y == 4, 2, ifelse(gish_m2_y == 3, 3, ifelse(gish_m2_y == 2, 4, ifelse(gish_m2_y == 1, 5, ifelse(gish_m2_y == 0, 0, NA)))))))%>%
+  mutate(gish1f = ifelse(gish_f1_y == 5, 1, ifelse(gish_f1_y == 4, 2, ifelse(gish_f1_y == 3, 3, ifelse(gish_f1_y == 2, 4, ifelse(gish_f1_y == 1, 5, ifelse(gish_f1_y == 0, 0, NA)))))))%>%
+  mutate(gish2f = ifelse(gish_f2_y == 5, 1, ifelse(gish_f2_y == 4, 2, ifelse(gish_f2_y == 3, 3, ifelse(gish_f2_y == 2, 4, ifelse(gish_f2_y == 1, 5, ifelse(gish_f2_y == 0, 0, NA)))))))%>%
+  mutate(gish3m = ifelse(gish_m3_y == 5, 1, ifelse(gish_m3_y == 4, 2, ifelse(gish_m3_y == 3, 3, ifelse(gish_m3_y == 2, 4, ifelse(gish_m3_y == 1, 5, ifelse(gish_m3_y == 0, 0, NA)))))))%>%
+  mutate(gish4m = ifelse(gish_m4_y == 5, 1, ifelse(gish_m4_y == 4, 2, ifelse(gish_m4_y == 3, 3, ifelse(gish_m4_y == 2, 4, ifelse(gish_m4_y == 1, 5, ifelse(gish_m4_y == 0, 0, NA)))))))%>%
+  mutate(gish3f = ifelse(gish_f3_y == 5, 1, ifelse(gish_f3_y == 4, 2, ifelse(gish_f3_y == 3, 3, ifelse(gish_f3_y == 2, 4, ifelse(gish_f3_y == 1, 5, ifelse(gish_f3_y == 0, 0, NA)))))))%>%
+  mutate(gish4f = ifelse(gish_f4_y == 5, 1, ifelse(gish_f4_y == 4, 2, ifelse(gish_f4_y == 3, 3, ifelse(gish_f4_y == 2, 4, ifelse(gish_f4_y == 1, 5, ifelse(gish_f4_y == 0, 0, NA)))))))%>%
+  
+  # Sum of gish items defined above
+  mutate(gish.sum = ifelse(sex == 1, gish1m + gish2m + gish3m + gish4m, ifelse(sex == 2, gish1f + gish2f + gish3f + gish4f, NA)))%>%
+  mutate(gish.bin = ifelse(gish.sum == 4, 0, ifelse(gish.sum > 4, 1, NA)))%>%
+  mutate(gish.sum.zeroed = gish.sum - 4)%>%
+  
+  # For each sex-assigned-at-birth category, create GV.step variables
+  mutate(GV.step.male = ifelse(sex == 1 & ((gish_m1_y == 0 | is.na(gish_m1_y)) | (gish_m2_y == 0 | is.na(gish_m2_y))), NA, ifelse(sex == 1 & (gish_m1_y == 5 & gish_m2_y == 5), 'CONGRUENT', ifelse(sex == 1 & ((gish_m1_y == 5 & gish_m2_y == 4) | (gish_m1_y == 4 & gish_m2_y == 5)), '1-STEP', ifelse(sex == 1 & (gish_m1_y == 4 & gish_m2_y == 4), '2-STEP', ifelse(sex == 1 & !is.na(gish_m1_y) & !is.na(gish_m2_y) & gish_m1_y != 0 & gish_m2_y != 0,'MINORITY', NA))))))%>%
+  mutate(GV.step.female = ifelse(sex == 2 & ((gish_f1_y == 0 | is.na(gish_f1_y)) | (gish_f2_y == 0 | is.na(gish_f2_y))), NA, ifelse(sex == 2 & (gish_f1_y == 5 & gish_f2_y == 5), 'CONGRUENT', ifelse(sex == 2 & ((gish_f1_y == 5 & gish_f2_y == 4) | (gish_f1_y == 4 & gish_f2_y == 5)), '1-STEP', ifelse(sex == 2 & (gish_f1_y == 4 & gish_f2_y == 4), '2-STEP', ifelse(sex == 2 & !is.na(gish_f1_y) & !is.na(gish_f2_y) & gish_f1_y != 0 & gish_f2_y != 0, 'MINORITY', NA))))))%>%
+  
+  # Combine GV.step vars separated by sex-assigned-at-birth into one variable
+  mutate(GV.step = ifelse(is.na(GV.step.male) & is.na(GV.step.female), NA, ifelse(!is.na(GV.step.male) & is.na(GV.step.female), GV.step.male, ifelse(is.na(GV.step.male) & !is.na(GV.step.female), GV.step.female, NA))))%>%
+  mutate(felt.gender.cnt = ifelse(sex == 1, (gish1m + gish2m) - 2, ifelse(sex == 2, (gish1f + gish2f) - 2, NA)))%>%
+  mutate(felt.gender.bin = ifelse(felt.gender.cnt > 0, 1, ifelse(felt.gender.cnt == 0, 0, NA)))%>%
+  mutate(noncontent.gender.cnt = ifelse(sex == 1, gish3m - 1, ifelse(sex == 2, gish3f - 1, NA)))%>%
+  mutate(noncontent.gender.bin = ifelse(noncontent.gender.cnt > 0, 1, ifelse(noncontent.gender.cnt == 0, 0, NA)))%>%
+  mutate(express.gender.cnt = ifelse(sex == 1, gish4m - 1, ifelse(sex == 2, gish4f - 1, NA)))%>%
+  mutate(express.gender.bin = ifelse(express.gender.cnt > 0, 1, ifelse(express.gender.cnt == 0, 0 , NA))) %>%
+  mutate(gish_avg = ifelse(is.na(gish_y_ss_m_avg), gish_y_ss_f_avg, gish_y_ss_m_avg)) %>%
+  select(-sex)
+  
+## longitudinal version of GV.min (i.e, if GV min at any time point)
+
+gv.step.long.df = data.frame(
+  "subjectkey" = unique(gid$subjectkey),
+  "GV.step.long" = rep(NA, length(unique(gid$subjectkey))),
+  "GV.step.long.2min" = rep(NA, length(unique(gid$subjectkey)))
+)
+
+gv.lev.revs = c("MINORITY","1-STEP","2-STEP","CONGRUENT")
+
+for (i in seq_along(gv.step.long.df$subjectkey)) {
+  gvs = gid$GV.step[gid$subjectkey == gv.step.long.df$subjectkey[i]]
+  
+  for (lev in gv.lev.revs) {
+    if (lev %in% gvs) {
+      gv.step.long.df$GV.step.long[i] = lev
+      break
+    }
+  }
+  
+  min_count = sum(gvs == "MINORITY", na.rm=T)
+  if (min_count > 1) {
+    gv.step.long.df$GV.step.long.2min[i] = "MIN"
+  } else {
+    gv.step.long.df$GV.step.long.2min[i] = "CON"
+  }
+  
+}
+
+if (!"GV.step.long" %in% colnames(gid)) {
+  gid = left_join(gid, gv.step.long.df, by = "subjectkey")
+}
+
+gid$gish.bin = factor(gid$gish.bin, labels = c('Congruent','Incongruent'))
+```
+
+
+## Puberty
+
+Missingness is high for youth ppdms, so we're sticking with parent rated
+
+```{r}
+##puberty
+
+parent_pube <- read.csv(file.path(abcd_wd, 'physical-health/ph_p_pds.csv')) %>%
+  rename(subjectkey = src_subject_id) %>%
+  getridofnas(.,c('', 777, 999)) %>%
+  left_join(., sex, by = 'subjectkey') %>%
+  mutate(ppdms.parent = ifelse(sex == 1, pds_1_p + pds_2_p + pds_3_p + pds_m4_p + pds_m5_p, 
+                               ifelse(sex == 2, pds_1_p + pds_2_p + pds_3_p + pds_f4_p + pds_f5b_p, NA)))%>%
+  mutate(ppdms.mean = ppdms.parent/5) %>%
+  dplyr::select(subjectkey, eventname, ppdms.mean)
+
+youth_pube <- read.csv(file.path(abcd_wd,"physical-health/ph_y_pds.csv")) %>%
+  rename(subjectkey = src_subject_id) %>%
+  getridofnas(.,c("", 777, 999)) %>%
+  left_join(.,sex,by = 'subjectkey') %>%
+  mutate(ppdms.youth = ifelse(sex == 1, pds_ht2_y + pds_bdyhair_y + pds_skin2_y + pds_m4_y + pds_m5_y,
+                              ifelse(sex ==2, pds_ht2_y + pds_bdyhair_y + pds_skin2_y + pds_f4_2_y + pds_f5_y, NA))) %>%
+  select(subjectkey, eventname, ppdms.youth)
+ 
+
+```
+
+## PEQ
+
+**First, read in PEQ**
+```{r}
+##peq
+peq <- read.csv(file.path(abcd_wd, 'mental-health/mh_y_peq.csv')) %>%
+  rename(subjectkey = src_subject_id) %>%
+  getridofnas(.,c(999,777,'')) %>%
+  mutate(peq.perp.sum = peq_left_out_perp + peq_chase_perp + peq_rumor_perp + peq_invite_perp + peq_exclude_perp + peq_gossip_perp + peq_threat_perp + peq_loser_perp + peq_hit_perp)%>%
+  mutate(peq.vic.sum = peq_left_out_vic + peq_chase_vic + peq_rumor_vic + peq_invite_vic + peq_exclude_vic + peq_gossip_vic + peq_threat_vic + peq_loser_vic + peq_hit_vic)%>%
+  mutate(any.weekly.vic = ifelse(peq_left_out_vic > 3 | peq_chase_vic > 3 | peq_rumor_vic > 3 | peq_invite_vic > 3 | peq_exclude_vic > 3 | peq_gossip_vic > 3 | peq_threat_vic > 3 | peq_loser_vic > 3 | peq_hit_vic > 3, 1, ifelse(peq_left_out_vic <= 3 & peq_chase_vic <= 3 & peq_rumor_vic <= 3 & peq_invite_vic <= 3 & peq_exclude_vic <= 3 & peq_gossip_vic <= 3 & peq_threat_vic <= 3 & peq_loser_vic <= 3 & peq_hit_vic <= 3, 0, NA))) %>%
+  select(subjectkey, eventname, peq.perp.sum, peq.vic.sum, any.weekly.vic, peq_ss_relational_aggs, peq_ss_relational_victim, peq_ss_reputation_aggs, peq_ss_reputation_victim, peq_ss_overt_aggression, peq_ss_overt_victim)
+```
+
+
+## State level data
+yay  
+
+First, let's read in the data. These data represent tallies of protective/harmful laws from 2018 to the present. Of note, each year the total number of tallies changes (due to changes in possible laws, e.g., if MA decided in 2019 to enact a super beneficial law that was "worth" 5 points in the eyes of the Movement Advancement Project, then the total possible number of points per state would increase by 5 points. kapish?). There will be some munging involved, which I'll silence from the .html, but if you're interested you can take a look at the .Rmd to see how we'll match each year's data to the correct timepoint.
+```{r}  
+# Add data about state laws
+statelaw <- read.csv(file.path(proj_dir, 'data/ABCD_historic_state_laws.csv'))
+statelaw$STATE = ifelse(statelaw$STATE == "VM", "VT", statelaw$STATE)
+```
+
+```{r, include = F, eval=T}
+### THIS CHUNK WILL MUNGE DATA SO THAT WE CAN ATTACH EACH YEAR'S RESPECTIVE GID TALLY TO ITS DATAPOINT PER SUBJECT. This can also be found here: '~/Documents/psychosis_gender_project/abcd/data/mergedStateLawData_script.r'
+allevents = c("baseline_year_1_arm_1", "1_year_follow_up_y_arm_1", "2_year_follow_up_y_arm_1","3_year_follow_up_y_arm_1", "4_year_follow_up_y_arm_1")
+
+renameEvents <- function(data) {
+  key = c('baseline_year_1_arm_1', '1_year_follow_up_y_arm_1', '2_year_follow_up_y_arm_1', '3_year_follow_up_y_arm_1', '4_year_follow_up_y_arm_1')
+  keyShort = c('BL', 'Y1', 'Y2', 'Y3', 'Y4')
+  
+  data$eventname = sapply(data$eventname, function(x) keyShort[which(key == x)])
+  
+  return(data)
+}
+
+int_date <- read.csv(file.path(abcd_wd, 'abcd-general/abcd_y_lt.csv')) %>%
+  filter(eventname %in% allevents) %>%
+  rename(subjectkey = src_subject_id) %>%
+  select(subjectkey, eventname, interview_date) %>%
+  left_join(., select(fulldemo, subjectkey, eventname, site_id_l), by = c("subjectkey", "eventname"))
+
+## Create new column called "year" to put year of data collection
+int_date$interview_year = sapply(int_date$interview_date, function(x) paste(strsplit(x, split = '')[[1]][(nchar(x)-3) : (nchar(x))], collapse = '', sep = ''))
+
+# Create empty columns to add state law data to
+lawTallies <- cbind(int_date, as.data.frame(matrix(ncol = 7, nrow = nrow(int_date))))
+
+length(which(is.na(lawTallies$site_id_l))) ## 0 missing site data
+
+
+
+# Name the empty columns
+colnames(lawTallies)[6:12] = c('STATE','youth_tally_raw', 'gid_tally_raw','overall_tally_raw','youth_tally_prop', 'gid_tally_prop', 'overall_tally_prop')
+
+sln = colnames(statelaw)
+
+years.with.data <- c(2017:2022)
+sites.with.data <- statelaw$SITE_ID
+
+lawTallies <- lawTallies %>%
+  filter(site_id_l %in% sites.with.data) %>%
+  filter(interview_year %in% years.with.data)
+
+# Loop to append data
+for (i in c(1:nrow(lawTallies))) {
+  if (!lawTallies$interview_year[i] %in% years.with.data) {
+    lawTallies[i,c('youth_tally_raw','gid_tally_raw','overall_tally_raw', 'youth_tally_prop','gid_tally_prop','overall_tally_prop')] = rep(NA, 6)
+  } else {
+    lawTallies[i,c('youth_tally_raw','gid_tally_raw','overall_tally_raw', 'youth_tally_prop','gid_tally_prop','overall_tally_prop')] = statelaw[which(statelaw$SITE_ID == lawTallies$site_id_l[i]), which(grepl(lawTallies$interview_year[i], sln))]
+  
+    lawTallies$STATE[i] = statelaw[which(statelaw$SITE_ID == lawTallies$site_id_l[i]), 'STATE']
+  }
+  
+  print(nrow(lawTallies)-i)
+}
+
+
+lawTallies2 <- lawTallies %>%
+  mutate(youth_tally_prop_bin = ifelse(is.na(youth_tally_prop), NA, ifelse(youth_tally_prop < 0.5, 0, 1))) %>%
+  mutate(gid_tally_prop_bin = ifelse(is.na(gid_tally_prop), NA, ifelse(gid_tally_prop < 0.5, 0, 1))) %>%
+  mutate(overall_tally_prop_bin = ifelse(is.na(overall_tally_prop), NA, ifelse(overall_tally_prop < 0.5, 0, 1))) %>%
+  select(-site_id_l)
+
+lawTally_only <- select(lawTallies2, subjectkey, eventname, interview_year, STATE, youth_tally_raw, gid_tally_raw, overall_tally_raw, youth_tally_prop, gid_tally_prop, overall_tally_prop, youth_tally_prop_bin, gid_tally_prop_bin, overall_tally_prop_bin)
+```
+
+### Gini coefficients  
+
+There are two versions of data from American Community Survey (ACS). One is the 1 year estimates which are the most current but smaller sample sizes (compared to 5-year estimates). 5-year estimates seemingly incorporate data from the past 5 years up to the year indicated. I think conceptually the 1-year estimates are more appropriate for our research questions. But there are no 1-year estimate data for 2020, so we'll include the 5-year estimates as a check. I'd imagine the correlation between 1- and 5-year estimates is high
+```{r gini}
+## GINI
+stateAbb <- c("AL","AK","AZ","AR","CA","CO","CT","DE","DC","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","PR")
+
+# 1 year
+gini2017 <- read.csv(file.path(proj_dir, "data/gini_coefficients/1year_estimates/ACSDT1Y2017.B19083-2024-03-02T021817.csv")) %>%
+  select(contains("Estimate"))
+
+gini2018 <- read.csv(file.path(proj_dir, "data/gini_coefficients/1year_estimates/ACSDT1Y2018.B19083-2024-03-02T021811.csv")) %>%
+  select(contains("Estimate"))
+
+gini2019 <- read.csv(file.path(proj_dir, "data/gini_coefficients/1year_estimates/ACSDT1Y2019.B19083-2024-03-02T021804.csv")) %>%
+  select(contains("Estimate"))
+
+gini2021 <- read.csv(file.path(proj_dir, "data/gini_coefficients/1year_estimates/ACSDT1Y2021.B19083-2024-03-02T021708.csv")) %>%
+  select(contains("Estimate"))
+
+gini2022 <- read.csv(file.path(proj_dir, "data/gini_coefficients/1year_estimates/ACSDT1Y2022.B19083-2024-03-02T021735.csv")) %>%
+  select(contains("Estimate"))
+
+gini_1year <- data.frame("STATE" = rep(stateAbb,5),
+                   "interview_year" = rep(c(2017, 2018, 2019, 2021, 2022), each = length(stateAbb)),
+                   "gini" = c(as.numeric(gini2017[1,]), 
+                              as.numeric(gini2018[1,]), 
+                              as.numeric(gini2019[1,]),
+                              as.numeric(gini2021[1,]),
+                              as.numeric(gini2022[1,])))
+gini$interview_year = as.character(gini$interview_year)
+
+# 5-year
+fiveyear_files = list.files(file.path(proj_dir, "data/gini_coefficients/5year_estimates"))
+
+gini_5year <- lapply(fiveyear_files,
+                     function(x) {
+                       dat <- read.csv(file.path(proj_dir, "data/gini_coefficients/5year_estimates/", x)) %>%
+                         dplyr::select(contains("Estimate"))
+                     })
+
+gini_5year <- data.frame(
+  "STATE" = rep(stateAbb, 6),
+  "interview_year" = as.character(rep(c(2017:2022), each = length(stateAbb))),
+  "gini" =c(
+    as.numeric(gini_5year[[1]][1,]),
+    as.numeric(gini_5year[[2]][1,]),
+    as.numeric(gini_5year[[3]][1,]),
+    as.numeric(gini_5year[[4]][1,]),
+    as.numeric(gini_5year[[5]][1,]),
+    as.numeric(gini_5year[[6]][1,])
+  )
+)
+
+
+# correlation between 1- and 5-year
+gini5_check = dplyr::filter(gini_5year, interview_year != 2020)
+cor(gini5_check$gini, gini_1year$gini)
+
+stateLevel <- left_join(lawTally_only, gini_5year, by = c("STATE","interview_year"))
+```
+
+
+**LGBT-specific discrimination and demographics**
+```{r}
+# Discrimination
+ydmes <- read.csv(file.path(abcd_wd, 'culture-environment/ce_y_dm.csv')) %>%
+  rename(subjectkey = src_subject_id) %>%
+  select(subjectkey, eventname, dim_yesno_q3)%>%
+  getridofnas(.,c('', 777, 999))
+```
+
+### PQB
+```{r pqb}
+pqb <- read.csv(file.path(abcd_wd, "mental-health/mh_y_pps.csv")) %>%
+  rename(subjectkey = src_subject_id, pqb.distress = pps_y_ss_severity_score, pqb.total = pps_y_ss_number) %>%
+  rowwise() %>%
+  # item level
+  mutate(pqb1.distress = sum(prodromal_1_y, prodromal_1b_y, na.rm=T)) %>%
+  mutate(pqb2.distress = sum(prodromal_2_y, prodromal_2b_y, na.rm=T)) %>%
+  mutate(pqb3.distress = sum(prodromal_3_y, prodromal_3b_y, na.rm=T)) %>%
+  mutate(pqb4.distress = sum(prodromal_4_y, prodromal_4b_y, na.rm=T)) %>%
+  mutate(pqb5.distress = sum(prodromal_5_y, prodromal_5b_y, na.rm=T)) %>%
+  mutate(pqb6.distress = sum(prodromal_6_y, prodromal_6b_y, na.rm=T)) %>%
+  mutate(pqb7.distress = sum(prodromal_7_y, prodromal_7b_y, na.rm=T)) %>%
+  mutate(pqb8.distress = sum(prodromal_8_y, prodromal_8b_y, na.rm=T)) %>%
+  mutate(pqb9.distress = sum(prodromal_9_y, prodromal_9b_y, na.rm=T)) %>%
+  mutate(pqb10.distress = sum(prodromal_10_y, prodromal_10b_y, na.rm=T)) %>%
+  mutate(pqb11.distress = sum(prodromal_11_y, prodromal_11b_y, na.rm=T)) %>%
+  mutate(pqb12.distress = sum(prodromal_12_y, prodromal_12b_y, na.rm=T)) %>%
+  mutate(pqb13.distress = sum(prodromal_13_y, prodromal_13b_y, na.rm=T)) %>%
+  mutate(pqb14.distress = sum(prodromal_14_y, prodromal_14b_y, na.rm=T)) %>%
+  mutate(pqb15.distress = sum(prodromal_15_y, prodromal_15b_y, na.rm=T)) %>%
+  mutate(pqb16.distress = sum(prodromal_16_y, prodromal_16b_y, na.rm=T)) %>%
+  mutate(pqb17.distress = sum(prodromal_17_y, prodromal_17b_y, na.rm=T)) %>%
+  mutate(pqb18.distress = sum(prodromal_18_y, prodromal_18b_y, na.rm=T)) %>%
+  mutate(pqb19.distress = sum(prodromal_19_y, prodromal_19b_y, na.rm=T)) %>%
+  mutate(pqb20.distress = sum(prodromal_20_y, prodromal_20b_y, na.rm=T)) %>%
+  mutate(pqb21.distress = sum(prodromal_21_y, prodromal_21b_y, na.rm=T)) %>%
+
+  # without 8 or 18, taking out social fear items
+  mutate(pqb.distress.noSocialFear = sum(prodromal_1_y , prodromal_2_y , prodromal_3_y , prodromal_4_y , prodromal_5_y , prodromal_6_y , prodromal_7_y , prodromal_9_y , prodromal_10_y , prodromal_11_y , prodromal_12_y , prodromal_13_y , prodromal_14_y , prodromal_15_y , prodromal_16_y , prodromal_17_y, prodromal_19_y , prodromal_20_y , prodromal_21_y, prodromal_1b_y , prodromal_2b_y , prodromal_3b_y , prodromal_4b_y , prodromal_5b_y , prodromal_6b_y , prodromal_7b_y, prodromal_9b_y , prodromal_10b_y , prodromal_11b_y , prodromal_12b_y , prodromal_13b_y , prodromal_14b_y , prodromal_15b_y , prodromal_16b_y , prodromal_17b_y , prodromal_19b_y , prodromal_20b_y , prodromal_21b_y, na.rm=T)) %>%
+  ungroup() %>%
+  select(subjectkey, eventname, pqb.distress, pqb.total, pqb.distress.noSocialFear,
+         pqb1.distress, pqb2.distress, pqb3.distress, pqb4.distress, pqb5.distress, pqb6.distress, pqb7.distress, pqb8.distress, pqb9.distress, pqb10.distress, pqb11.distress, pqb12.distress, pqb13.distress, pqb14.distress, pqb15.distress, pqb16.distress, pqb17.distress, pqb18.distress, pqb19.distress, pqb20.distress, pqb21.distress) %>%
+  filter(!is.na(pqb.distress))
+
+```
+
+### CBCL
+```{r cbcl}
+cbcl <- read.csv(file.path(abcd_wd, "mental-health/mh_p_cbcl.csv")) %>%
+  rename(subjectkey = src_subject_id, cbcl.total = cbcl_scr_syn_totprob_t, cbcl.internal = cbcl_scr_syn_internal_t, cbcl.external = cbcl_scr_syn_external_t) %>%
+  select(subjectkey, eventname, cbcl.total, cbcl.internal, cbcl.external)
+```
+
+### Brief Problem Monitor
+```{r}
+bpm <- read.csv(file.path(abcd_wd, "mental-health/mh_y_bpm.csv")) %>%
+  rename(
+    subjectkey = src_subject_id, 
+    bpm.total = bpm_y_scr_totalprob_t, 
+    bpm.internal = bpm_y_scr_internal_t,
+    bpm.attention = bpm_y_scr_attention_t,
+    bpm.external = bpm_y_scr_external_t) %>%
+  select(subjectkey, eventname, bpm.total, bpm.internal, bpm.attention, bpm.external)
+```
+
+
+### family support
+```{r}
+# Family support
+famSupp = read.csv(file.path(abcd_wd, "culture-environment/ce_p_fes.csv")) %>%
+  select(src_subject_id, eventname, fes_p_ss_exp_sum, fes_p_ss_cohesion_sum) %>%
+  rename(subjectkey = src_subject_id)
+```
+
+
+### ADI
+```{r}
+# Area deprivation index
+adi = read.csv(file.path(abcd_wd, "linked-external-data/led_l_adi.csv")) %>%
+  select(src_subject_id, eventname, reshist_addr3_adi_wsum, reshist_addr3_adi_perc, reshist_addr1_adi_edu_l, reshist_addr2_adi_in_dis) %>%
+  rename(subjectkey = src_subject_id) %>%
+  select(-eventname)
+```
+
+### COI
+```{r}
+# Child opportunity index
+coi = read.csv(file.path(abcd_wd, "linked-external-data/led_l_coi.csv")) %>%
+  select(src_subject_id, eventname, reshist_addr1_coi_r_coi_met) %>%
+  rename(subjectkey = src_subject_id) %>%
+  select(-eventname)
+```
+
+
+```{r}
+master <- left_join(fulldemo, gid, by = c('subjectkey', 'eventname')) %>%
+  left_join(., parent_pube, by = c("subjectkey", "eventname")) %>%
+  left_join(., peq, by = c("subjectkey", "eventname")) %>%
+  left_join(.,stateLevel, by = c("subjectkey","eventname")) %>%
+  left_join(.,ydmes, by = c('subjectkey','eventname')) %>%
+  left_join(., pqb, by = c("subjectkey", "eventname")) %>%
+  left_join(.,cbcl,by = c("subjectkey","eventname")) %>%
+  left_join(.,bpm, by = c("subjectkey", "eventname")) %>%
+  left_join(.,famSupp, by = c("subjectkey", "eventname")) %>%
+  left_join(.,adi, by = c("subjectkey")) %>%
+  left_join(.,coi, by = c("subjectkey"))
+
+master$eventname = case_match(master$eventname,
+                              "baseline_year_1_arm_1" ~ "BL",
+                              "1_year_follow_up_y_arm_1" ~ "Y1",
+                              "2_year_follow_up_y_arm_1" ~ "Y2",
+                              "3_year_follow_up_y_arm_1" ~ "Y3",
+                              "4_year_follow_up_y_arm_1" ~ "Y4")
+```
+
+## Delta GID 1 through 4
+```{r}
+
+## Create year 1 through 4 master (for models without PEQ)
+master1t4 <- master %>% 
+  filter(eventname != 'BL') %>%
+  mutate(time.point = dplyr::recode(eventname, `Y1` = 1, `Y2` = 2, `Y3` = 3, `Y4` = 4)) %>%
+  filter(!is.na(GV.step))
+
+## separate into year 1 and year 4 to calculate delta scores
+y1 <- filter(master1t4, time.point == 1) 
+
+colnames(y1)[7:ncol(y1)] = paste('Y1', colnames(y1)[7:ncol(y1)], sep = '.')
+
+
+y4 <- filter(master1t4, time.point == 4)
+
+colnames(y4)[2:ncol(y4)] = paste('Y4', colnames(y4)[2:ncol(y4)], sep = '.')
+
+
+delta1t4 <- left_join(y1, y4, by = 'subjectkey') %>%
+  #mutate(delta.age = Y4.age - Y1.age) %>%
+  #mutate(delta.puberty = Y4.z.puberty - Y1.z.puberty) %>%
+  #mutate(delta.pqb.distress = Y4.z.pqb.distress - Y1.z.pqb.distress) %>%
+  mutate(delta.GV = ifelse(Y1.GV.step %in% c('1-STEP', '2-STEP', 'MINORITY') & Y4.GV.step %in% c('1-STEP', '2-STEP', 'MINORITY'), 'Incon2Incon', ifelse(Y1.GV.step %in% c('1-STEP', '2-STEP', 'MINORITY') & Y4.GV.step == 'CONGRUENT', 'Incon2Con', ifelse(Y1.GV.step == 'CONGRUENT' & Y4.GV.step %in% c('1-STEP', '2-STEP', 'MINORITY'), 'Con2Incon', ifelse(Y1.GV.step == 'CONGRUENT' & Y4.GV.step == 'CONGRUENT', 'Con2Con', NA))))) %>%
+  mutate(delta.GIDTally_calc = Y4.gid_tally_prop - Y1.gid_tally_prop) %>%
+  filter(!is.na(delta.GV))
+
+
+
+
+# Set threshold to determine longitudinal state-level policy variables
+threshHigh = 0.23
+threshLow = -0.1
+
+deltaGID <- delta1t4 %>%
+  mutate(delta.GIDTally = ifelse(delta.GIDTally_calc >= threshLow & delta.GIDTally_calc <= threshHigh, 'Same', ifelse(delta.GIDTally_calc < threshLow, "Decreased", ifelse(delta.GIDTally_calc > threshHigh, "Increased", NA)))) %>%
+  mutate(delta.GID.Levels = ifelse((delta.GIDTally == 'Same' & Y4.gid_tally_prop < 0.5), 'LowNoChange', ifelse(delta.GIDTally == 'Same' & Y4.gid_tally_prop >= 0.5, 'HighNoChange', ifelse(delta.GIDTally == 'Decreased', NA, delta.GIDTally)))) %>%
+  select(subjectkey, delta.GID.Levels, delta.GIDTally, delta.GIDTally_calc)
+
+newMaster1 <- left_join(master1t4, deltaGID, by = 'subjectkey') %>%
+  rename(age = interview_age)
+
+
+# -- plot histogram to show thresholds
+quants = quantile(deltaGID$delta.GIDTally_calc)
+
+ggplot(deltaGID, aes(x = delta.GIDTally_calc)) +
+  geom_histogram(binwidth = 0.05) +
+  geom_vline(xintercept = quants[[4]], color = "red") +
+  geom_vline(xintercept = quants[[2]], color = "red") +
+  xlab("Proportional Difference Scores (Gender Identity Related Policies)") +
+  ylab("Count")
+
+```
+
+## Delta GID 1 through 3
+```{r}
+
+## Create year 1 through 3 master 
+master1t3 <- master %>% 
+  filter(!eventname %in% c('BL', 'Y4')) %>%
+  mutate(time.point = dplyr::recode(eventname, `Y1` = 1, `Y2` = 2, `Y3` = 3)) %>%
+  filter(!is.na(GV.step))
+
+## separate into year 1 and year 3 to calculate delta scores
+y1 <- filter(master1t3, time.point == 1) 
+
+colnames(y1)[7:ncol(y1)] = paste('Y1', colnames(y1)[7:ncol(y1)], sep = '.')
+
+
+y3 <- filter(master1t3, time.point == 3)
+
+colnames(y3)[2:ncol(y3)] = paste('Y3', colnames(y3)[2:ncol(y3)], sep = '.')
+
+
+delta1t3 <- left_join(y1, y3, by = 'subjectkey') %>%
+  mutate(delta.GV = ifelse(Y1.GV.step %in% c('1-STEP', '2-STEP', 'MINORITY') & Y3.GV.step %in% c('1-STEP', '2-STEP', 'MINORITY'), 'Incon2Incon', ifelse(Y1.GV.step %in% c('1-STEP', '2-STEP', 'MINORITY') & Y3.GV.step == 'CONGRUENT', 'Incon2Con', ifelse(Y1.GV.step == 'CONGRUENT' & Y3.GV.step %in% c('1-STEP', '2-STEP', 'MINORITY'), 'Con2Incon', ifelse(Y1.GV.step == 'CONGRUENT' & Y3.GV.step == 'CONGRUENT', 'Con2Con', NA))))) %>%
+  mutate(delta.GIDTally_calc.1t3 = Y3.gid_tally_prop - Y1.gid_tally_prop) %>%
+  filter(!is.na(delta.GV))
+
+quantile(delta1t3$delta.GIDTally_calc, na.rm=T)
+
+# Set threshold to determine longitudinal state-level policy variables
+## Start out with the quantiles then see who is in the declining states since in the 1t4 iteration, there were no meaningful declining states
+threshHigh = 0.165
+threshLow = -0.1
+
+deltaGID <- delta1t3 %>%
+  mutate(delta.GIDTally.1t3 = ifelse(delta.GIDTally_calc.1t3 >= threshLow & delta.GIDTally_calc.1t3 <= threshHigh, 'Same',
+                                 ifelse(delta.GIDTally_calc.1t3 < threshLow, "Decreased", 
+                                        ifelse(delta.GIDTally_calc.1t3 > threshHigh, "Increased", NA)))) %>%
+  mutate(delta.GID.Levels.1t3 = ifelse((delta.GIDTally.1t3 == 'Same' & Y3.gid_tally_prop < 0.5), 'LowNoChange',
+                                   ifelse(delta.GIDTally.1t3 == 'Same' & Y3.gid_tally_prop >= 0.5, 'HighNoChange',
+                                          ifelse(delta.GIDTally.1t3 == 'Decreased', NA, delta.GIDTally.1t3)))) %>%
+  mutate(sameState.1t3 = ifelse(is.na(Y1.STATE), NA, 
+                            ifelse(is.na(Y3.STATE), NA,
+                                   ifelse(Y1.STATE == Y3.STATE, 1, 0)))) %>%
+  select(subjectkey, delta.GID.Levels.1t3, delta.GIDTally.1t3, delta.GIDTally_calc.1t3, sameState.1t3)
+
+newMaster <- left_join(newMaster1, deltaGID, by = 'subjectkey')
+
+  
+```
+
+Here we're going to zero the bullying variables (since the minimum is 9 for total score since there are 9 questions where the minimum repsonse is a 1). We'll also scale (standardize, m=0,sd=1) some variables
+```{r}
+# Set GV.step as a factor
+newMaster$GV.step = factor(newMaster$GV.step, levels = c('CONGRUENT','1-STEP','2-STEP','MINORITY'))
+
+zeroScores = function(data) {
+  return(data - min(data, na.rm=T))
+}
+
+# Zero PEQ sum scores
+newMaster$peq.vic.sum = zeroScores(newMaster$peq.vic.sum)
+
+newMaster$peq.perp.sum = zeroScores(newMaster$peq.perp.sum)
+
+newMaster$peq_ss_relational_victim = zeroScores(newMaster$peq_ss_relational_victim)
+
+newMaster$peq_ss_relational_aggs = zeroScores(newMaster$peq_ss_relational_aggs)
+
+newMaster$peq_ss_overt_victim = zeroScores(newMaster$peq_ss_overt_victim)
+
+newMaster$peq_ss_overt_aggression = zeroScores(newMaster$peq_ss_overt_aggression)
+
+newMaster$peq_ss_reputation_victim = zeroScores(newMaster$peq_ss_reputation_victim)
+
+newMaster$peq_ss_reputation_aggs = zeroScores(newMaster$peq_ss_reputation_aggs)
+
+newMaster$z.puberty = as.numeric(scale(newMaster$ppdms.mean))
+newMaster$z.pqb.distress <- as.numeric(scale(newMaster$pqb.distress))
+
+newMaster$z.peq.vic.sum <- as.numeric(scale(newMaster$peq.vic.sum))
+newMaster$z.peq.perp.sum = as.numeric(scale(newMaster$peq.perp.sum))
+newMaster$z.peq_ss_relational_victim = as.numeric(scale(newMaster$peq_ss_relational_victim))
+newMaster$z.peq_ss_relational_aggs = as.numeric(scale(newMaster$peq_ss_relational_aggs))
+newMaster$z.peq_ss_reputation_victim = as.numeric(scale(newMaster$peq_ss_reputation_victim))
+newMaster$z.peq_ss_reputation_aggs = as.numeric(scale(newMaster$peq_ss_relational_aggs))
+newMaster$z.peq_ss_overt_victim = as.numeric(scale(newMaster$peq_ss_overt_victim))
+newMaster$z.peq_ss_overt_aggression = as.numeric(scale(newMaster$peq_ss_overt_aggression))
+
+
+
+newMaster$z.cbcl.total <- as.numeric(scale(newMaster$cbcl.total))
+newMaster$z.cbcl.internal <- as.numeric(scale(newMaster$cbcl.internal))
+newMaster$z.cbcl.external <- as.numeric(scale(newMaster$cbcl.external))
+
+newMaster$z.bpm.total <- as.numeric(scale(newMaster$bpm.total))
+```
+
+## Write master
+```{r write-master}
+datetime = format(Sys.Date(), "%Y%m%d")
+
+outdir = file.path(proj_dir, "data")
+csvname = paste0("masterSheet_", datetime, ".csv")
+
+write.csv(
+  newMaster,
+  file.path(outdir, csvname),
+  row.names=F
+)
+```
+

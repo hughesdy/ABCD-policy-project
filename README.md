@@ -10,7 +10,11 @@ If you have access to the release 5.1 in its default file structure, that's your
 1. masterCreation.Rmd
    -
    This will create the master file required for the analysis script.
-2. analysesManuscript_clean.Rmd
+   You'll have to edit line 42 to point to the corresponding directory on your device:
+   42:   abcd_wd = "/Users/dylanhughes/Documents/abcd/abcd-data-release-5.1/core"
+
+   
+3. analysesManuscript_clean.Rmd
    -
    This is the main analysis script
 

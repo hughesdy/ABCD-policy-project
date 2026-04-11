@@ -23,6 +23,7 @@ If you have access to the release 5.1 in its default file structure, that's your
    -
    This is the main analysis script
 
+# Required raw abcd data:
 ### Demographics
 "abcd-general/abcd_p_demo.csv"
 "abcd-general/abcd_y_lt.csv"

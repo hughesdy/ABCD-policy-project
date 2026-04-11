@@ -10,9 +10,13 @@ If you have access to the release 5.1 in its default file structure, that's your
 1. masterCreation.Rmd
    -
    This will create the master file required for the analysis script. <br>
-   You'll have to edit line 42 to point to the corresponding directory on your device: <br>
+   You'll have to edit line 42 to point to your directory with ABCD data: <br>
    <br>
-   &nbsp;&nbsp;Line 42:&nbsp;&nbsp;&nbsp;&nbsp;   abcd_wd = "/Users/dylanhughes/Documents/abcd/abcd-data-release-5.1/core"
+   &nbsp;&nbsp;&nbsp;&nbsp;   abcd_wd = "/Users/dylanhughes/Documents/abcd/abcd-data-release-5.1/core" <br>
+   <br>
+   And, on line 47 to point to the directory in which this repo is stored: <br><br>
+   &nbsp;&nbsp;&nbsp;&nbsp;    proj_dir = "/Users/dylanhughes/Documents/psychosis_gender_project/abcd/manuscript/package/"
+   
 
    
 3. analysesManuscript_clean.Rmd

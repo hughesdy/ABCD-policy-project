@@ -1,5 +1,5 @@
 # ABCD-policy-project
-This repository is home to the analyses in Hughes et al (under review). Pre-print posted here: https://www.medrxiv.org/content/10.64898/2025.12.19.25342709v1
+This repository is home to the analyses in Hughes et al, 2026, JAMA Network Open. https://jamanetwork.com/journals/jamanetworkopen/fullarticle/2847993?utm_source=For_The_Media&utm_medium=referral&utm_campaign=ftm_links&utm_term=042126
 
 # Description
 Everything you need to reproduce the results (and figures and tables) should be included in the package/ directory. You'll first need access to the ABCD data (https://www.nbdc-datahub.org/). Once downloaded, take note of where the data live and then pass that directory name into the scripts/masterCreation.rmd file. I'm realizing right now that since we use release 5.1 for the analyses in this project, it might take some finessing to make the script compatible with the default file structure output from releases >= 6.0. 
